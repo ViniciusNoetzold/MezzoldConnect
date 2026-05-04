@@ -2,8 +2,12 @@ __pycache__/
 *.py[cod]
 .venv/
 venv/
+build/
+dist/
 
 .env
+data/
+*.sqlite3
 
 usuarios.csv
 contatos_db.csv
