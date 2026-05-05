@@ -10,9 +10,9 @@ APP_RUN_KEY = "Mezzold Connect"
 
 def startup_command() -> str:
     if getattr(sys, "frozen", False):
-        return f'"{sys.executable}"'
+        return f'"{sys.executable}" --background'
     main_path = Path(__file__).resolve().parent / "main.py"
-    return f'"{sys.executable}" "{main_path}"'
+    return f'"{sys.executable}" "{main_path}" --background'
 
 
 def is_supported() -> bool:
@@ -36,7 +36,7 @@ def is_startup_enabled() -> bool:
 
 def set_startup_enabled(enabled: bool) -> None:
     if not is_supported():
-        raise RuntimeError("Inicialização automática está disponível apenas no Windows.")
+        raise RuntimeError("Iniciar junto com o computador só funciona no Windows.")
 
     import winreg
 

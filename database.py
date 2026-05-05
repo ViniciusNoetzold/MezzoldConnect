@@ -144,6 +144,62 @@ def initialize_database() -> None:
                 FOREIGN KEY (contact_id) REFERENCES contacts(id) ON DELETE SET NULL
             );
 
+            CREATE TABLE IF NOT EXISTS whatsapp_numbers (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                display_name TEXT NOT NULL,
+                phone TEXT NOT NULL UNIQUE,
+                phone_number_id TEXT DEFAULT '',
+                provider TEXT DEFAULT 'official_api',
+                status TEXT NOT NULL DEFAULT 'testing',
+                quality_rating TEXT NOT NULL DEFAULT 'unknown',
+                messaging_limit INTEGER NOT NULL DEFAULT 250,
+                daily_target INTEGER NOT NULL DEFAULT 20,
+                max_daily_target INTEGER NOT NULL DEFAULT 500,
+                ready_for_campaigns INTEGER NOT NULL DEFAULT 0,
+                active INTEGER NOT NULL DEFAULT 1,
+                rest_start TEXT NOT NULL DEFAULT '00:00',
+                rest_end TEXT NOT NULL DEFAULT '07:00',
+                notes TEXT DEFAULT '',
+                last_health_check_at TEXT,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS number_rampup_runs (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                whatsapp_number_id INTEGER NOT NULL,
+                status TEXT NOT NULL DEFAULT 'running',
+                group_name TEXT DEFAULT '',
+                target_contacts INTEGER NOT NULL DEFAULT 0,
+                sent INTEGER NOT NULL DEFAULT 0,
+                simulated INTEGER NOT NULL DEFAULT 0,
+                manual INTEGER NOT NULL DEFAULT 0,
+                failed INTEGER NOT NULL DEFAULT 0,
+                skipped INTEGER NOT NULL DEFAULT 0,
+                started_at TEXT NOT NULL,
+                finished_at TEXT,
+                notes TEXT DEFAULT '',
+                FOREIGN KEY (whatsapp_number_id) REFERENCES whatsapp_numbers(id) ON DELETE CASCADE
+            );
+
+            CREATE TABLE IF NOT EXISTS number_rampup_events (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                run_id INTEGER,
+                whatsapp_number_id INTEGER NOT NULL,
+                contact_id INTEGER,
+                phone TEXT NOT NULL,
+                recipient_name TEXT DEFAULT '',
+                status TEXT NOT NULL,
+                error_message TEXT DEFAULT '',
+                provider_message_id TEXT DEFAULT '',
+                action_url TEXT DEFAULT '',
+                message_body TEXT DEFAULT '',
+                created_at TEXT NOT NULL,
+                FOREIGN KEY (run_id) REFERENCES number_rampup_runs(id) ON DELETE SET NULL,
+                FOREIGN KEY (whatsapp_number_id) REFERENCES whatsapp_numbers(id) ON DELETE CASCADE,
+                FOREIGN KEY (contact_id) REFERENCES contacts(id) ON DELETE SET NULL
+            );
+
             CREATE TABLE IF NOT EXISTS settings (
                 key TEXT PRIMARY KEY,
                 value TEXT NOT NULL DEFAULT '',
@@ -163,6 +219,9 @@ def initialize_database() -> None:
             CREATE INDEX IF NOT EXISTS idx_contacts_opt_in ON contacts(opt_in);
             CREATE INDEX IF NOT EXISTS idx_logs_created ON message_logs(created_at);
             CREATE INDEX IF NOT EXISTS idx_campaigns_status ON campaigns(status);
+            CREATE INDEX IF NOT EXISTS idx_numbers_status ON whatsapp_numbers(status);
+            CREATE INDEX IF NOT EXISTS idx_rampup_events_number ON number_rampup_events(whatsapp_number_id, created_at);
+            CREATE INDEX IF NOT EXISTS idx_rampup_events_contact ON number_rampup_events(contact_id);
             """
         )
 
@@ -200,6 +259,9 @@ def initialize_database() -> None:
             "smart_pause_max_seconds": "300",
             "smart_daily_limit": "100",
             "smart_max_session_minutes": "90",
+            "rampup_min_interval_seconds": "45",
+            "rampup_max_interval_seconds": "180",
+            "rampup_daily_floor": "5",
             "block_high_risk_campaigns": "1",
             "company_name": "Mezzold",
         }

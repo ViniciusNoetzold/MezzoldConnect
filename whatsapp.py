@@ -60,7 +60,7 @@ def _protect_secret(secret: str) -> str:
     if not secret:
         return ""
     if os.name != "nt":
-        raise WhatsAppAPIError("Persistência segura de token só está habilitada no Windows via DPAPI.")
+        raise WhatsAppAPIError("Não consegui salvar o token com segurança neste Windows.")
 
     import ctypes
 
@@ -156,7 +156,7 @@ def _media_component(media_path: str) -> dict[str, Any] | None:
     if not media_path:
         return None
     if not media_path.startswith(("http://", "https://")):
-        raise WhatsAppAPIError("Para envio real de mídia, use uma URL pública ou faça upload prévio na Meta.")
+        raise WhatsAppAPIError("Para enviar imagem ou arquivo de verdade, use um link público ou envie antes pela Meta.")
 
     suffix = Path(media_path).suffix.lower()
     if suffix in {".jpg", ".jpeg", ".png", ".webp"}:
@@ -196,12 +196,12 @@ class WhatsAppBusinessClient:
             )
 
         if not self.is_configured:
-            raise WhatsAppAPIError("Configure token e ID do número do WhatsApp Business.")
+            raise WhatsAppAPIError("Preencha o token e o ID do número do WhatsApp Business.")
         if not template_name:
             if category == "service" and _inside_customer_service_window(contact.get("last_inbound_at")):
                 return self.send_text_message(phone, message)
             raise WhatsAppAPIError(
-                "Campanhas reais iniciadas pela empresa precisam usar um template aprovado."
+                "Para envio automático real, use um modelo aprovado pela Meta."
             )
 
         return self.send_template_message(
@@ -257,7 +257,7 @@ class WhatsAppBusinessClient:
 
     def send_text_message(self, to: str, body: str, preview_url: bool = False) -> SendResult:
         if not body.strip():
-            raise WhatsAppAPIError("Mensagem de atendimento sem texto.")
+            raise WhatsAppAPIError("A mensagem está vazia.")
 
         payload: dict[str, Any] = {
             "messaging_product": "whatsapp",
@@ -296,12 +296,12 @@ class WhatsAppBusinessClient:
             body = exc.read().decode("utf-8", errors="replace")
             raise WhatsAppAPIError(_format_meta_error(exc.code, body)) from exc
         except urllib.error.URLError as exc:
-            raise WhatsAppAPIError(f"Falha de conexão com a Meta: {exc.reason}") from exc
+            raise WhatsAppAPIError(f"Não consegui conectar com a Meta: {exc.reason}") from exc
 
         try:
             return json.loads(body)
         except json.JSONDecodeError as exc:
-            raise WhatsAppAPIError("A Meta retornou uma resposta inválida.") from exc
+            raise WhatsAppAPIError("A Meta retornou uma resposta que o app não conseguiu entender.") from exc
 
 
 def _format_meta_error(status_code: int, body: str) -> str:

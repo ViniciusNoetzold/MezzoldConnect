@@ -1,57 +1,59 @@
-# Manual de uso - Mezzold Connect
+# Mezzold Connect
 
-O Mezzold Connect é um aplicativo desktop para organizar contatos, campanhas, agendamentos, histórico e envios pelo WhatsApp.
+O Mezzold Connect é um aplicativo para Windows que ajuda a organizar clientes, campanhas e envios pelo WhatsApp.
 
-## Requisitos
+Ele foi pensado para rodar na máquina do cliente. Você abre a tela para configurar tudo e, depois, o app pode ficar trabalhando em segundo plano quando o computador ligar.
 
-- Windows com internet ativa.
-- Python instalado para rodar em desenvolvimento.
-- WhatsApp Business Cloud API para envio oficial automático, ou modo manual assistido para clientes sem API.
+## Como Instalar
 
-Sem internet, o app ainda abre e permite consultar dados locais, mas não consegue enviar campanhas, abrir links `wa.me`, validar páginas oficiais ou usar a API.
-
-## Como abrir
+Use o instalador:
 
 ```powershell
-python main.py
+installer\Mezzold Connect Setup.exe
 ```
 
-Na primeira abertura, crie o usuário administrador. Depois faça login normalmente.
+O instalador faz quatro coisas:
 
-## Telas principais
+- copia o aplicativo para a pasta do usuário no Windows;
+- cria atalho na Área de Trabalho;
+- cria atalho no Menu Iniciar;
+- configura o envio em segundo plano para iniciar junto com o computador.
 
-### Dashboard
+## Como Abrir
 
-Mostra resumo de contatos, campanhas, agendamentos, envios e falhas.
+Depois de instalar, abra pelo atalho **Mezzold Connect**.
 
-### Contatos
+Na primeira vez, crie o primeiro acesso do sistema. Depois, entre com usuário e senha.
 
-Use para cadastrar, editar e excluir contatos.
+## Como o App Trabalha em Segundo Plano
 
-Campos importantes:
+Quando a opção **Começar sozinho quando ligar o computador** estiver ativa, o Windows inicia o app em modo invisível.
 
-- **Nome**: nome do cliente.
-- **Número**: pode ser digitado com espaços, parênteses, hífen ou `+55`; o app normaliza automaticamente.
-- **Grupo/lista**: ajuda a segmentar campanhas.
-- **Contato autorizou mensagens**: deve estar marcado para envio.
-- **Blacklist**: bloqueia contatos que pediram descadastro ou não devem receber mensagens.
-- **Origem/data do opt-in**: registre de onde veio a autorização.
+Nesse modo, ele:
 
-Exemplo aceito:
+- verifica campanhas agendadas;
+- retoma campanhas que pararam no meio;
+- respeita os limites configurados;
+- registra tudo no histórico.
 
-```text
-(55) 54 99150-9999
-```
+Para mudar contatos, mensagens, números e configurações, abra a janela normal do aplicativo.
 
-O app salva no formato:
+## Clientes
 
-```text
-5554991509999
-```
+Use a tela **Clientes** para cadastrar quem pode receber mensagens.
 
-### Importar contatos
+Campos mais importantes:
 
-Importa CSV ou Excel `.xlsx`.
+- **Nome do cliente**: nome que aparece nos relatórios.
+- **Telefone com DDD**: pode usar espaços, parênteses, hífen ou `+55`.
+- **Cliente autorizou receber mensagens**: marque apenas quando houver autorização.
+- **Bloquear este cliente para envios**: use quando a pessoa pediu para não receber mais mensagens.
+- **Onde autorizou receber mensagens**: exemplo: formulário, WhatsApp, contrato, atendimento.
+- **Comprovante ou observação da autorização**: anote qualquer detalhe que ajude a provar a autorização.
+
+## Importar Clientes
+
+Use **Importar clientes** para trazer uma planilha CSV ou Excel.
 
 Colunas recomendadas:
 
@@ -65,113 +67,129 @@ Colunas recomendadas:
 - `data_opt_in`
 - `prova`
 
-O app remove duplicados, valida números e ignora linhas inválidas.
+O app tenta limpar telefones, evitar repetidos e ignorar linhas inválidas.
 
-### Criar campanha
+## Nova Campanha
 
-Crie o nome, categoria, template, mensagem e lista de contatos.
+Use **Nova campanha** para preparar a mensagem.
 
-Se o **Disparo inteligente** estiver ativo, a campanha precisa ter pelo menos 3 mensagens diferentes. Coloque uma mensagem principal e as outras no campo **Variações adicionais de mensagem**.
+Você escolhe:
 
-Para separar textos longos, use uma linha com:
+- nome da campanha;
+- tipo de mensagem;
+- modelo aprovado na Meta, quando for envio automático oficial;
+- mensagem principal;
+- outras versões da mensagem;
+- clientes autorizados.
+
+Se as pausas automáticas estiverem ligadas, use pelo menos 3 versões de mensagem.
+
+Para separar versões longas, use uma linha assim:
 
 ```text
 ---
 ```
 
-### Agendar envio
+## Agenda de Envios
 
-Permite agendar, enviar agora, pausar ou cancelar campanhas.
+Use **Agenda de envios** para escolher quando enviar.
 
-Se o app for fechado durante uma campanha, os contatos já enviados ficam registrados no banco. Ao abrir novamente, campanhas que estavam com status `enviando` são retomadas a partir dos contatos pendentes, desde que haja internet.
+Você pode:
 
-### Risco
+- agendar;
+- enviar agora;
+- pausar envio;
+- cancelar envio.
 
-Mostra o risco por campanha em porcentagem.
+Se o computador desligar ou perder internet, o app salva o que já foi feito e tenta retomar depois.
 
-O cálculo considera:
+## Aquecimento dos Números
 
-- contatos sem opt-in;
-- blacklist;
-- opt-out;
-- ausência de prova de consentimento;
-- template ausente;
-- janela de 24h;
-- volume diário;
-- intervalo de envio;
-- modo sem API oficial;
-- histórico de falhas.
+Use **Aquecer números** antes de usar um número em campanhas maiores.
 
-Esse score não garante ausência de bloqueio. Ele é uma camada preventiva.
+O aquecimento começa com poucos envios por dia e aumenta aos poucos:
 
-### Histórico
+- começa em 20 envios por dia;
+- cresce 20% por dia;
+- nunca passa do limite máximo configurado;
+- não envia entre 00:00 e 07:00 por padrão;
+- calcula um score de saúde de 0 a 100;
+- pausa automaticamente números com score abaixo de 40.
 
-Mostra envios, falhas, pendências manuais e erros.
+A tela mostra:
 
-Use **Números já enviados** para ver quais números já receberam ou entraram na fila manual.
+- score do número;
+- quantidade que pode enviar hoje;
+- quanto já enviou;
+- horário em que não deve enviar;
+- se o número já pode ser usado em campanhas.
 
-No modo manual assistido, use **Abrir link manual** para abrir o WhatsApp com a mensagem preparada.
+## Conferir Risco
+
+Use **Conferir risco** para revisar campanhas antes de enviar.
+
+O app observa pontos como:
+
+- clientes sem autorização;
+- clientes bloqueados;
+- falta de prova de autorização;
+- volume alto;
+- histórico de erro;
+- uso fora da API oficial.
+
+O risco não garante que nada dará errado, mas ajuda a evitar problemas óbvios.
+
+## Histórico
+
+Use **Histórico de envios** para ver o que aconteceu.
+
+Ali aparecem envios feitos, erros, simulações e links manuais do WhatsApp.
 
 ## Configurações
 
-### Modo de envio
+Use **Configurações** para ajustar:
 
-- `official_api`: usa WhatsApp Business Cloud API ou provedor oficial.
-- `manual_assisted`: gera links `wa.me` e registra pendência manual. Não automatiza WhatsApp Web, QR Code ou disparos em massa.
+- modo de envio;
+- token e IDs da Meta;
+- modo teste;
+- limite diário;
+- pausas automáticas;
+- aquecimento dos números;
+- licença;
+- backup.
 
-### Internet
+### Modo Teste
 
-Use **Testar conexão** para verificar se o computador está conectado. O envio e os links oficiais dependem de internet.
+Com **Modo teste** ligado, o app registra os envios sem mandar mensagem de verdade.
 
-### Inicializar com Windows
+Use isso para treinar, revisar campanha e testar a operação.
 
-Marque **Iniciar automaticamente com o Windows** para abrir o Mezzold Connect ao ligar o computador.
+### Modo Manual
 
-### Disparo inteligente
+O modo manual abre um link do WhatsApp para a pessoa concluir o envio.
 
-Quando ativado:
-
-- usa intervalos variáveis;
-- cria pausas maiores a cada X envios;
-- aplica limite diário inteligente;
-- evita sessões contínuas por muitas horas;
-- exige pelo menos 3 mensagens diferentes;
-- registra qual texto e mídia foram usados.
-
-Ele não embaralha letras, não camufla texto e não garante ausência de banimento.
-
-### Salvar alterações
-
-O botão **Salvar alterações** usa confirmação em duas etapas:
-
-- senha do usuário logado;
-- código numérico temporário mostrado na confirmação.
-
-As configurações só são aplicadas depois dessa confirmação.
-
-## Políticas oficiais
-
-Leia antes de vender ou operar campanhas:
-
-- Política oficial do WhatsApp: https://www.whatsapp.com/legal/business-policy/
-- Documentação da Cloud API: https://meta-preview.mintlify.io/docs/whatsapp/cloud-api/overview
+Ele não automatiza WhatsApp Web, QR Code ou disparo em massa fora da API oficial.
 
 ## Backup
 
-Na tela de configurações, clique em **Criar backup** para salvar uma cópia do banco SQLite.
+Na tela **Configurações**, clique em **Criar backup** para salvar uma cópia do banco local.
 
-## Gerar executável
+## Para Desenvolvedores
 
-Instale o PyInstaller:
+Rodar em desenvolvimento:
 
 ```powershell
-python -m pip install pyinstaller
+python main.py
 ```
 
-Gere o executável:
+Gerar o aplicativo:
 
 ```powershell
 .\build.ps1
 ```
 
-Depois teste em uma máquina limpa, sem Python instalado.
+Gerar o instalador:
+
+```powershell
+.\installer\build-installer.ps1
+```

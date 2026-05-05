@@ -15,12 +15,48 @@ import compliance
 import contacts
 import network
 import startup
+import warmup
 import whatsapp
 from database import APP_TITLE, APP_VERSION, DB_PATH, connect, get_setting, row_to_dict, set_setting
 
 
 WHATSAPP_POLICY_URL = "https://www.whatsapp.com/legal/business-policy/"
 META_CLOUD_API_URL = "https://meta-preview.mintlify.io/docs/whatsapp/cloud-api/overview"
+
+STATUS_LABELS = {
+    "rascunho": "Rascunho",
+    "agendada": "Agendada",
+    "enviando": "Enviando",
+    "concluída": "Concluída",
+    "concluida": "Concluída",
+    "pausada": "Pausada",
+    "cancelada": "Cancelada",
+    "enviado": "Enviado",
+    "simulado": "Teste",
+    "pendente_manual": "Aguardando envio manual",
+    "aguardando_manual": "Aguardando envio manual",
+    "falhou": "Erro",
+    "bloqueado": "Bloqueado",
+    "sem_autorizacao": "Sem autorização",
+    "testing": "Em aquecimento",
+    "healthy": "Saudável",
+    "paused": "Pausado",
+    "auto_paused": "Pausado pela saúde",
+    "restricted": "Restrito",
+    "banned": "Banido",
+    "unknown": "Ainda sem dados",
+    "high": "Boa",
+    "medium": "Atenção",
+    "low": "Ruim",
+    "critical": "Crítico",
+    "warning": "Atenção",
+    "safe": "Baixo",
+}
+
+
+def friendly_status(value: object) -> str:
+    text = str(value or "").strip()
+    return STATUS_LABELS.get(text, text)
 
 
 class MezzoldApp(tk.Tk):
@@ -31,8 +67,9 @@ class MezzoldApp(tk.Tk):
         self.minsize(1040, 680)
         self.current_user: auth.User | None = None
         self.content: ttk.Frame | None = None
-        self.status_var = tk.StringVar(value="Pronto")
+        self.status_var = tk.StringVar(value="Tudo pronto.")
         self.running_events: dict[int, threading.Event] = {}
+        self.running_warmups: dict[int, threading.Event] = {}
         self.current_screen = ""
 
         self._configure_style()
@@ -71,7 +108,7 @@ class MezzoldApp(tk.Tk):
 
         ttk.Label(panel, text=APP_TITLE, style="Panel.TLabel", font=("Segoe UI Semibold", 22)).pack(anchor="w")
         initial = auth.user_count() == 0
-        subtitle = "Crie o primeiro usuário administrador." if initial else "Entre para gerenciar contatos e campanhas."
+        subtitle = "Crie o primeiro acesso do sistema." if initial else "Entre para cuidar dos clientes e envios."
         ttk.Label(panel, text=subtitle, style="Muted.TLabel").pack(anchor="w", pady=(4, 22))
 
         username = tk.StringVar()
@@ -87,7 +124,7 @@ class MezzoldApp(tk.Tk):
         def do_login() -> None:
             user = auth.authenticate(username.get(), password.get())
             if not user:
-                messagebox.showerror(APP_TITLE, "Usuário ou senha inválidos.")
+                messagebox.showerror(APP_TITLE, "Usuário ou senha não conferem.")
                 return
             self.current_user = user
             self.show_main()
@@ -102,13 +139,13 @@ class MezzoldApp(tk.Tk):
                 messagebox.showerror(APP_TITLE, str(exc))
                 return
             self.current_user = user
-            messagebox.showinfo(APP_TITLE, "Usuário criado com sucesso.")
+            messagebox.showinfo(APP_TITLE, "Acesso criado com sucesso.")
             self.show_main()
 
         actions = ttk.Frame(panel, style="Panel.TFrame")
         actions.pack(fill="x", pady=(8, 0))
         ttk.Button(actions, text="Entrar", style="Accent.TButton", command=do_login).pack(side="left")
-        ttk.Button(actions, text="Criar usuário", command=do_create).pack(side="left", padx=(8, 0))
+        ttk.Button(actions, text="Criar acesso", command=do_create).pack(side="left", padx=(8, 0))
 
     def show_main(self) -> None:
         self._clear()
@@ -132,19 +169,20 @@ class MezzoldApp(tk.Tk):
         ).pack(anchor="w", pady=(0, 18))
 
         buttons = [
-            ("Dashboard", self.show_dashboard),
-            ("Contatos", self.show_contacts),
-            ("Importar contatos", self.show_import_contacts),
-            ("Criar campanha", self.show_create_campaign),
-            ("Agendar envio", self.show_schedule),
-            ("Risco", self.show_risk),
+            ("Início", self.show_dashboard),
+            ("Clientes", self.show_contacts),
+            ("Importar clientes", self.show_import_contacts),
+            ("Nova campanha", self.show_create_campaign),
+            ("Agenda de envios", self.show_schedule),
+            ("Aquecer números", self.show_number_health),
+            ("Conferir risco", self.show_risk),
             ("Histórico", self.show_history),
             ("Configurações", self.show_settings),
         ]
         for label, command in buttons:
             ttk.Button(sidebar, text=label, style="Sidebar.TButton", command=command).pack(fill="x", pady=3)
 
-        ttk.Button(sidebar, text="Sair", command=self.show_login).pack(fill="x", side="bottom")
+        ttk.Button(sidebar, text="Trocar usuário", command=self.show_login).pack(fill="x", side="bottom")
 
         main_area = ttk.Frame(shell)
         main_area.pack(side="left", fill="both", expand=True)
@@ -197,19 +235,19 @@ class MezzoldApp(tk.Tk):
         self.status_var.set(text)
 
     def show_dashboard(self) -> None:
-        frame = self._screen("Dashboard")
+        frame = self._screen("Início")
         metrics = ttk.Frame(frame)
         metrics.pack(fill="x")
 
         stats = campaigns.dashboard_stats()
         labels = [
-            ("Contatos", stats["contacts"]),
-            ("Com opt-in", stats["opt_in"]),
-            ("Blacklist", stats["blocked"]),
+            ("Clientes", stats["contacts"]),
+            ("Autorizados", stats["opt_in"]),
+            ("Bloqueados", stats["blocked"]),
             ("Campanhas", stats["campaigns"]),
             ("Agendadas", stats["scheduled"]),
             ("Enviadas", stats["sent"]),
-            ("Falhas", stats["failed"]),
+            ("Com erro", stats["failed"]),
         ]
         for label, value in labels:
             card = ttk.Frame(metrics, style="Panel.TFrame", padding=16)
@@ -220,22 +258,22 @@ class MezzoldApp(tk.Tk):
         actions = ttk.Frame(frame)
         actions.pack(fill="x", pady=18)
         ttk.Button(actions, text="Atualizar", command=self.show_dashboard).pack(side="left")
-        ttk.Button(actions, text="Enviar agendadas agora", command=self._send_due_campaigns).pack(side="left", padx=(8, 0))
+        ttk.Button(actions, text="Enviar o que está atrasado", command=self._send_due_campaigns).pack(side="left", padx=(8, 0))
 
-        ttk.Label(frame, text="Campanhas recentes", font=("Segoe UI Semibold", 12)).pack(anchor="w", pady=(12, 8))
+        ttk.Label(frame, text="Últimas campanhas", font=("Segoe UI Semibold", 12)).pack(anchor="w", pady=(12, 8))
         tree = self._campaign_tree(frame)
         tree.pack(fill="both", expand=True)
         self._fill_campaign_tree(tree)
 
     def show_contacts(self) -> None:
-        frame = self._screen("Contatos")
+        frame = self._screen("Clientes")
         top = ttk.Frame(frame)
         top.pack(fill="x", pady=(0, 10))
         search = tk.StringVar()
         ttk.Label(top, text="Buscar").pack(side="left")
         ttk.Entry(top, textvariable=search, width=34).pack(side="left", padx=(8, 8))
         ttk.Button(top, text="Filtrar", command=lambda: refresh()).pack(side="left")
-        ttk.Button(top, text="Importar", command=self.show_import_contacts).pack(side="left", padx=(8, 0))
+        ttk.Button(top, text="Importar lista", command=self.show_import_contacts).pack(side="left", padx=(8, 0))
 
         body = ttk.Frame(frame)
         body.pack(fill="both", expand=True)
@@ -245,12 +283,12 @@ class MezzoldApp(tk.Tk):
         tree = ttk.Treeview(tree_frame, columns=columns, show="headings", selectmode="browse")
         headings = {
             "id": "ID",
-            "name": "Nome",
-            "phone": "Número",
+            "name": "Cliente",
+            "phone": "Telefone",
             "group": "Grupo",
-            "opt_in": "Opt-in",
+            "opt_in": "Autorizado",
             "source": "Origem",
-            "blacklisted": "Blacklist",
+            "blacklisted": "Bloqueado",
         }
         widths = {"id": 55, "name": 190, "phone": 130, "group": 120, "opt_in": 70, "source": 130, "blacklisted": 90}
         for column in columns:
@@ -278,20 +316,20 @@ class MezzoldApp(tk.Tk):
         blacklisted = tk.BooleanVar(value=False)
 
         for label, variable in [
-            ("Nome", name),
-            ("Número", phone),
+            ("Nome do cliente", name),
+            ("Telefone com DDD", phone),
             ("E-mail", email),
             ("Grupo/lista", group_name),
-            ("Origem do opt-in", opt_in_source),
-            ("Categoria autorizada", opt_in_category),
-            ("Data do opt-in", opt_in_at),
-            ("Última mensagem recebida", last_inbound_at),
-            ("Prova/observação do consentimento", consent_notes),
-            ("Observações", notes),
+            ("Onde autorizou receber mensagens", opt_in_source),
+            ("Tipo de mensagem autorizada", opt_in_category),
+            ("Data da autorização", opt_in_at),
+            ("Última resposta recebida", last_inbound_at),
+            ("Comprovante ou observação da autorização", consent_notes),
+            ("Observações internas", notes),
         ]:
             self._entry(form, label, variable).pack(fill="x", pady=(0, 10))
-        ttk.Checkbutton(form, text="Contato autorizou mensagens", variable=opt_in).pack(anchor="w", pady=(0, 8))
-        ttk.Checkbutton(form, text="Está na blacklist", variable=blacklisted).pack(anchor="w", pady=(0, 12))
+        ttk.Checkbutton(form, text="Cliente autorizou receber mensagens", variable=opt_in).pack(anchor="w", pady=(0, 8))
+        ttk.Checkbutton(form, text="Bloquear este cliente para envios", variable=blacklisted).pack(anchor="w", pady=(0, 12))
 
         def clear_form() -> None:
             selected_id.set(0)
@@ -318,7 +356,7 @@ class MezzoldApp(tk.Tk):
                         "Sim" if item["blacklisted"] else "Não",
                     ),
                 )
-            self._set_status("Contatos atualizados.")
+            self._set_status("Lista de clientes atualizada.")
 
         def on_select(_event: object) -> None:
             if not tree.selection():
@@ -378,12 +416,12 @@ class MezzoldApp(tk.Tk):
                 messagebox.showerror(APP_TITLE, str(exc))
                 return
             refresh()
-            self._set_status("Contato salvo.")
+            self._set_status("Cliente salvo.")
 
         def delete() -> None:
             if not selected_id.get():
                 return
-            if not messagebox.askyesno(APP_TITLE, "Excluir este contato?"):
+            if not messagebox.askyesno(APP_TITLE, "Excluir este cliente?"):
                 return
             contacts.delete_contact(selected_id.get())
             clear_form()
@@ -393,24 +431,24 @@ class MezzoldApp(tk.Tk):
 
         ttk.Button(form, text="Novo", command=clear_form).pack(fill="x", pady=(4, 6))
         ttk.Button(form, text="Salvar", style="Accent.TButton", command=save).pack(fill="x", pady=6)
-        ttk.Button(form, text="Opt-out / blacklist", command=lambda: mark_opt_out()).pack(fill="x", pady=6)
+        ttk.Button(form, text="Marcar como pediu para sair", command=lambda: mark_opt_out()).pack(fill="x", pady=6)
         ttk.Button(form, text="Excluir", command=delete).pack(fill="x", pady=6)
 
         def mark_opt_out() -> None:
             if not selected_id.get():
                 return
-            contacts.mark_opt_out(selected_id.get(), "Marcado manualmente na interface.")
+            contacts.mark_opt_out(selected_id.get(), "Cliente pediu para nao receber mais mensagens.")
             refresh()
             clear_form()
         refresh()
 
     def show_import_contacts(self) -> None:
-        frame = self._screen("Importar contatos")
+        frame = self._screen("Importar clientes")
         panel = ttk.Frame(frame, style="Panel.TFrame", padding=18)
         panel.pack(fill="x")
         path = tk.StringVar()
         result = tk.StringVar(
-            value="Use CSV ou Excel (.xlsx) com nome, telefone, grupo, opt_in, origem, categoria e data_opt_in."
+            value="Escolha uma planilha CSV ou Excel com pelo menos nome e telefone. Se tiver autorização, informe também origem e data."
         )
 
         row = ttk.Frame(panel, style="Panel.TFrame")
@@ -418,7 +456,7 @@ class MezzoldApp(tk.Tk):
         ttk.Entry(row, textvariable=path).pack(side="left", fill="x", expand=True)
         ttk.Button(
             row,
-            text="Escolher arquivo",
+            text="Escolher planilha",
             command=lambda: path.set(filedialog.askopenfilename(filetypes=[("Planilhas", "*.csv *.txt *.xlsx"), ("Todos", "*.*")])),
         ).pack(side="left", padx=(8, 0))
 
@@ -432,46 +470,52 @@ class MezzoldApp(tk.Tk):
                 return
             errors = "\n".join(summary.errors[:5])
             text = (
-                f"Importados: {summary.imported} | Atualizados: {summary.updated} | "
-                f"Duplicados no arquivo: {summary.duplicates} | Ignorados: {summary.skipped}"
+                f"Novos clientes: {summary.imported} | Atualizados: {summary.updated} | "
+                f"Repetidos na planilha: {summary.duplicates} | Linhas ignoradas: {summary.skipped}"
             )
             if errors:
-                text += f"\nPrimeiros avisos:\n{errors}"
+                text += f"\nO que revisar primeiro:\n{errors}"
             result.set(text)
-            self._set_status("Importação concluída.")
+            self._set_status("Importação de clientes concluída.")
 
-        ttk.Button(panel, text="Importar contatos", style="Accent.TButton", command=do_import).pack(anchor="w")
+        ttk.Button(panel, text="Importar clientes", style="Accent.TButton", command=do_import).pack(anchor="w")
 
     def show_create_campaign(self) -> None:
-        frame = self._screen("Criar campanha")
+        frame = self._screen("Nova campanha")
         form = ttk.Frame(frame, style="Panel.TFrame", padding=16)
         form.pack(side="left", fill="both", expand=True)
         name = tk.StringVar()
         template_name = tk.StringVar(value=whatsapp.load_config().default_template)
         template_language = tk.StringVar(value=whatsapp.load_config().default_language)
-        message_category = tk.StringVar(value="marketing")
+        message_categories = {
+            "Marketing": "marketing",
+            "Aviso ou serviço": "utility",
+            "Código de acesso": "authentication",
+            "Atendimento": "service",
+        }
+        message_category = tk.StringVar(value="Marketing")
         media_path = tk.StringVar()
 
-        self._entry(form, "Nome da campanha", name).pack(fill="x", pady=(0, 10))
+        self._entry(form, "Nome para identificar esta campanha", name).pack(fill="x", pady=(0, 10))
         category_frame = ttk.Frame(form, style="Panel.TFrame")
         category_frame.pack(fill="x", pady=(0, 10))
-        ttk.Label(category_frame, text="Categoria da mensagem", style="Panel.TLabel").pack(anchor="w", pady=(0, 4))
+        ttk.Label(category_frame, text="Tipo de mensagem", style="Panel.TLabel").pack(anchor="w", pady=(0, 4))
         ttk.Combobox(
             category_frame,
             textvariable=message_category,
-            values=("marketing", "utility", "authentication", "service"),
+            values=tuple(message_categories.keys()),
             state="readonly",
         ).pack(fill="x")
         template_row = ttk.Frame(form, style="Panel.TFrame")
         template_row.pack(fill="x", pady=(0, 10))
-        self._entry(template_row, "Template aprovado", template_name).pack(side="left", fill="x", expand=True, padx=(0, 8))
+        self._entry(template_row, "Nome do modelo aprovado na Meta", template_name).pack(side="left", fill="x", expand=True, padx=(0, 8))
         self._entry(template_row, "Idioma", template_language).pack(side="left", fill="x")
 
-        ttk.Label(form, text="Mensagem/variável do template", style="Panel.TLabel").pack(anchor="w")
+        ttk.Label(form, text="Mensagem principal", style="Panel.TLabel").pack(anchor="w")
         message = tk.Text(form, height=8, wrap="word")
         message.pack(fill="both", expand=True, pady=(4, 10))
 
-        ttk.Label(form, text="Variações adicionais de mensagem", style="Panel.TLabel").pack(anchor="w")
+        ttk.Label(form, text="Outras versões da mensagem", style="Panel.TLabel").pack(anchor="w")
         message_variants = tk.Text(form, height=5, wrap="word")
         message_variants.pack(fill="both", expand=True, pady=(4, 10))
 
@@ -480,17 +524,17 @@ class MezzoldApp(tk.Tk):
         ttk.Entry(media_row, textvariable=media_path).pack(side="left", fill="x", expand=True)
         ttk.Button(
             media_row,
-            text="Mídia/URL",
+            text="Imagem, arquivo ou link",
             command=lambda: media_path.set(filedialog.askopenfilename() or media_path.get()),
         ).pack(side="left", padx=(8, 0))
 
-        ttk.Label(form, text="Mídias/URLs alternativas", style="Panel.TLabel").pack(anchor="w")
+        ttk.Label(form, text="Outras imagens, arquivos ou links", style="Panel.TLabel").pack(anchor="w")
         media_variants = tk.Text(form, height=3, wrap="word")
         media_variants.pack(fill="x", pady=(4, 10))
 
         contact_panel = ttk.Frame(frame, style="Panel.TFrame", padding=16)
         contact_panel.pack(side="right", fill="both", expand=True, padx=(16, 0))
-        ttk.Label(contact_panel, text="Contatos com opt-in", style="Panel.TLabel", font=("Segoe UI Semibold", 11)).pack(anchor="w")
+        ttk.Label(contact_panel, text="Clientes que autorizaram mensagens", style="Panel.TLabel", font=("Segoe UI Semibold", 11)).pack(anchor="w")
         filters = ttk.Frame(contact_panel, style="Panel.TFrame")
         filters.pack(fill="x", pady=(8, 8))
         group_filter = tk.StringVar()
@@ -502,8 +546,8 @@ class MezzoldApp(tk.Tk):
         tree = ttk.Treeview(contact_panel, columns=("id", "name", "phone", "group"), show="headings", selectmode="extended")
         for column, heading, width in [
             ("id", "ID", 50),
-            ("name", "Nome", 190),
-            ("phone", "Número", 130),
+            ("name", "Cliente", 190),
+            ("phone", "Telefone", 130),
             ("group", "Grupo", 120),
         ]:
             tree.heading(column, text=heading)
@@ -529,38 +573,38 @@ class MezzoldApp(tk.Tk):
                     media_path=media_path.get(),
                     template_name=template_name.get(),
                     template_language=template_language.get(),
-                    message_category=message_category.get(),
+                    message_category=message_categories.get(message_category.get(), "marketing"),
                     message_variants=parse_variants(message_variants.get("1.0", "end")),
                     media_variants=parse_variants(media_variants.get("1.0", "end")),
                 )
             except campaigns.CampaignError as exc:
                 messagebox.showerror(APP_TITLE, str(exc))
                 return
-            messagebox.showinfo(APP_TITLE, f"Campanha #{campaign_id} criada como rascunho.")
+            messagebox.showinfo(APP_TITLE, "Campanha salva. Agora você pode agendar ou enviar.")
             self.show_schedule()
 
         actions = ttk.Frame(contact_panel, style="Panel.TFrame")
         actions.pack(fill="x", pady=(10, 0))
-        ttk.Button(actions, text="Selecionar todos", command=select_all).pack(side="left")
-        ttk.Button(actions, text="Criar campanha", style="Accent.TButton", command=create).pack(side="right")
+        ttk.Button(actions, text="Marcar todos", command=select_all).pack(side="left")
+        ttk.Button(actions, text="Salvar campanha", style="Accent.TButton", command=create).pack(side="right")
         refresh_contacts()
 
     def show_schedule(self) -> None:
-        frame = self._screen("Agendar envio")
+        frame = self._screen("Agenda de envios")
         tree = self._campaign_tree(frame)
         tree.pack(fill="both", expand=True)
 
         controls = ttk.Frame(frame, style="Panel.TFrame", padding=14)
         controls.pack(fill="x", pady=(12, 0))
         scheduled_at = tk.StringVar(value=datetime.now().strftime("%Y-%m-%d %H:%M"))
-        ttk.Label(controls, text="Data e horário").pack(side="left")
+        ttk.Label(controls, text="Quando enviar").pack(side="left")
         ttk.Entry(controls, textvariable=scheduled_at, width=22).pack(side="left", padx=(8, 10))
-        progress = tk.StringVar(value="Selecione uma campanha.")
+        progress = tk.StringVar(value="Escolha uma campanha.")
         ttk.Label(controls, textvariable=progress).pack(side="left", padx=(8, 0))
 
         def selected_campaign_id() -> int | None:
             if not tree.selection():
-                messagebox.showwarning(APP_TITLE, "Selecione uma campanha.")
+                messagebox.showwarning(APP_TITLE, "Escolha uma campanha primeiro.")
                 return None
             return int(tree.item(tree.selection()[0], "values")[0])
 
@@ -577,7 +621,7 @@ class MezzoldApp(tk.Tk):
                 messagebox.showerror(APP_TITLE, str(exc))
                 return
             refresh()
-            self._set_status("Campanha agendada.")
+            self._set_status("Envio agendado.")
 
         def send_now() -> None:
             campaign_id = selected_campaign_id()
@@ -598,18 +642,18 @@ class MezzoldApp(tk.Tk):
             campaign_id = selected_campaign_id()
             if not campaign_id:
                 return
-            if messagebox.askyesno(APP_TITLE, "Cancelar esta campanha?"):
+            if messagebox.askyesno(APP_TITLE, "Cancelar esta campanha? Ela não será enviada."):
                 campaigns.cancel_campaign(campaign_id)
                 refresh()
 
         ttk.Button(controls, text="Agendar", command=schedule).pack(side="left", padx=(8, 0))
         ttk.Button(controls, text="Enviar agora", style="Accent.TButton", command=send_now).pack(side="left", padx=(8, 0))
-        ttk.Button(controls, text="Pausar", command=pause).pack(side="left", padx=(8, 0))
-        ttk.Button(controls, text="Cancelar", command=cancel).pack(side="left", padx=(8, 0))
+        ttk.Button(controls, text="Pausar envio", command=pause).pack(side="left", padx=(8, 0))
+        ttk.Button(controls, text="Cancelar envio", command=cancel).pack(side="left", padx=(8, 0))
         refresh()
 
     def show_risk(self) -> None:
-        frame = self._screen("Risco de banimento")
+        frame = self._screen("Conferir risco")
         risks = compliance.list_campaign_risks()
 
         chart = tk.Canvas(frame, height=190, background="#ffffff", highlightthickness=0)
@@ -625,7 +669,7 @@ class MezzoldApp(tk.Tk):
             ("id", "ID", 55),
             ("campaign", "Campanha", 220),
             ("score", "Risco", 80),
-            ("level", "Nível", 100),
+            ("level", "Alerta", 100),
             ("summary", "Principal motivo", 420),
         ]:
             tree.heading(column, text=heading)
@@ -634,7 +678,7 @@ class MezzoldApp(tk.Tk):
 
         detail = ttk.Frame(body, style="Panel.TFrame", padding=16)
         detail.pack(side="right", fill="both", expand=True, padx=(16, 0))
-        score_var = tk.StringVar(value="Selecione uma campanha.")
+        score_var = tk.StringVar(value="Escolha uma campanha para ver os cuidados.")
         notes_var = tk.StringVar(value="")
         ttk.Label(detail, textvariable=score_var, style="Panel.TLabel", font=("Segoe UI Semibold", 14)).pack(anchor="w")
         detail_bar = tk.Canvas(detail, height=28, background="#ffffff", highlightthickness=0)
@@ -652,7 +696,7 @@ class MezzoldApp(tk.Tk):
                     risk["campaign_id"],
                     risk["campaign_name"],
                     f"{risk['score']}%",
-                    risk["level"],
+                    friendly_status(risk["level"]),
                     notes[0] if notes else "",
                 ),
             )
@@ -662,7 +706,7 @@ class MezzoldApp(tk.Tk):
                 return
             campaign_id = int(tree.item(tree.selection()[0], "values")[0])
             risk = risk_by_id[campaign_id]
-            score_var.set(f"{risk['score']}% - {risk['level'].upper()}")
+            score_var.set(f"{risk['score']}% - {friendly_status(risk['level']).upper()}")
             notes_var.set("\n".join(f"- {note}" for note in risk["notes"]))
             self._draw_single_risk_bar(detail_bar, int(risk["score"]))
 
@@ -676,7 +720,7 @@ class MezzoldApp(tk.Tk):
             canvas.delete("all")
             width = max(canvas.winfo_width(), 400)
             if not risks:
-                canvas.create_text(20, 90, text="Nenhuma campanha criada.", anchor="w", fill="#6b7280")
+                canvas.create_text(20, 90, text="Nenhuma campanha salva ainda.", anchor="w", fill="#6b7280")
                 return
             left = 140
             top = 18
@@ -711,21 +755,21 @@ class MezzoldApp(tk.Tk):
         return "#16a34a"
 
     def show_history(self) -> None:
-        frame = self._screen("Histórico")
+        frame = self._screen("Histórico de envios")
         top = ttk.Frame(frame)
         top.pack(fill="x", pady=(0, 8))
         ttk.Button(top, text="Atualizar", command=self.show_history).pack(side="left")
-        ttk.Button(top, text="Abrir link manual", command=lambda: open_action()).pack(side="left", padx=(8, 0))
-        ttk.Button(top, text="Números já enviados", command=self.show_sent_numbers).pack(side="left", padx=(8, 0))
+        ttk.Button(top, text="Abrir WhatsApp manual", command=lambda: open_action()).pack(side="left", padx=(8, 0))
+        ttk.Button(top, text="Telefones já usados", command=self.show_sent_numbers).pack(side="left", padx=(8, 0))
         columns = ("created_at", "campaign", "recipient", "phone", "status", "action", "error")
         tree = ttk.Treeview(frame, columns=columns, show="headings")
         for column, heading, width in [
             ("created_at", "Data/hora", 150),
             ("campaign", "Campanha", 180),
             ("recipient", "Contato", 160),
-            ("phone", "Número", 130),
+            ("phone", "Telefone", 130),
             ("status", "Status", 110),
-            ("action", "Ação manual", 160),
+            ("action", "Abrir manualmente", 160),
             ("error", "Erro", 360),
         ]:
             tree.heading(column, text=heading)
@@ -741,7 +785,7 @@ class MezzoldApp(tk.Tk):
                     item.get("campaign_name") or "",
                     item["recipient_name"],
                     item["phone"],
-                    item["status"],
+                    friendly_status(item["status"]),
                     "Abrir WhatsApp" if item.get("action_url") else "",
                     item["error_message"],
                 ),
@@ -751,17 +795,17 @@ class MezzoldApp(tk.Tk):
 
         def open_action() -> None:
             if not tree.selection():
-                messagebox.showwarning(APP_TITLE, "Selecione um registro com ação manual.")
+                messagebox.showwarning(APP_TITLE, "Escolha uma linha que tenha link para abrir manualmente.")
                 return
             url = action_urls.get(tree.selection()[0])
             if not url:
-                messagebox.showinfo(APP_TITLE, "Este registro não possui link manual.")
+                messagebox.showinfo(APP_TITLE, "Essa linha não tem link manual.")
                 return
             self._open_external_link(url)
 
     def show_sent_numbers(self) -> None:
         window = tk.Toplevel(self)
-        window.title("Números já enviados")
+        window.title("Telefones já usados")
         window.geometry("780x460")
         window.transient(self)
         frame = ttk.Frame(window, padding=12)
@@ -769,12 +813,12 @@ class MezzoldApp(tk.Tk):
         columns = ("phone", "name", "campaign", "status", "attempts", "last")
         tree = ttk.Treeview(frame, columns=columns, show="headings")
         for column, heading, width in [
-            ("phone", "Número", 130),
-            ("name", "Contato", 160),
+            ("phone", "Telefone", 130),
+            ("name", "Cliente", 160),
             ("campaign", "Campanha", 180),
             ("status", "Status", 120),
-            ("attempts", "Tentativas", 80),
-            ("last", "Último registro", 150),
+            ("attempts", "Vezes", 80),
+            ("last", "Última vez", 150),
         ]:
             tree.heading(column, text=heading)
             tree.column(column, width=width, anchor="w")
@@ -787,14 +831,283 @@ class MezzoldApp(tk.Tk):
                     item["phone"],
                     item["recipient_name"],
                     item.get("campaign_name") or "",
-                    item["status"],
+                    friendly_status(item["status"]),
                     item["attempts"],
                     item["last_sent_at"],
                 ),
             )
 
+    def show_number_health(self) -> None:
+        frame = self._screen("Aquecimento dos números")
+        stats = warmup.dashboard_stats()
+        metrics = ttk.Frame(frame)
+        metrics.pack(fill="x", pady=(0, 12))
+        for label, value in [
+            ("Números", stats["total"]),
+            ("Ativos", stats["active"]),
+            ("Prontos para campanha", stats["ready"]),
+            ("Pausados", stats["paused"]),
+        ]:
+            card = ttk.Frame(metrics, style="Panel.TFrame", padding=12)
+            card.pack(side="left", fill="x", expand=True, padx=(0, 10))
+            ttk.Label(card, text=str(value), style="Metric.TLabel").pack(anchor="w")
+            ttk.Label(card, text=label, style="Muted.TLabel").pack(anchor="w")
+
+        body = ttk.Frame(frame)
+        body.pack(fill="both", expand=True)
+
+        left = ttk.Frame(body)
+        left.pack(side="left", fill="both", expand=True)
+        columns = ("id", "name", "phone", "status", "score", "quality", "target", "today", "rest", "ready")
+        tree = ttk.Treeview(left, columns=columns, show="headings", selectmode="browse", height=10)
+        for column, heading, width in [
+            ("id", "ID", 50),
+            ("name", "Nome", 150),
+            ("phone", "Telefone", 120),
+            ("status", "Status", 90),
+            ("score", "Score", 65),
+            ("quality", "Qualidade", 80),
+            ("target", "Pode enviar hoje", 100),
+            ("today", "Já enviou", 75),
+            ("rest", "Não enviar", 110),
+            ("ready", "Pronto", 65),
+        ]:
+            tree.heading(column, text=heading)
+            tree.column(column, width=width, anchor="w")
+        tree.pack(fill="x")
+
+        event_columns = ("created_at", "number", "recipient", "phone", "status", "error")
+        event_tree = ttk.Treeview(left, columns=event_columns, show="headings")
+        ttk.Label(left, text="Últimos testes de aquecimento", font=("Segoe UI Semibold", 12)).pack(anchor="w", pady=(14, 6))
+        for column, heading, width in [
+            ("created_at", "Data/hora", 145),
+            ("number", "Número usado", 130),
+            ("recipient", "Cliente", 150),
+            ("phone", "Telefone", 120),
+            ("status", "Status", 100),
+            ("error", "Erro", 280),
+        ]:
+            event_tree.heading(column, text=heading)
+            event_tree.column(column, width=width, anchor="w")
+        event_tree.pack(fill="both", expand=True)
+
+        form = ttk.Frame(body, style="Panel.TFrame", padding=16)
+        form.pack(side="right", fill="y", padx=(16, 0))
+        selected_id = tk.IntVar(value=0)
+        display_name = tk.StringVar()
+        phone = tk.StringVar()
+        phone_number_id = tk.StringVar()
+        provider = tk.StringVar(value="oficial")
+        status = tk.StringVar(value="testing")
+        quality = tk.StringVar(value="unknown")
+        messaging_limit = tk.StringVar(value="250")
+        daily_target = tk.StringVar(value="20")
+        max_daily_target = tk.StringVar(value="500")
+        rest_start = tk.StringVar(value="00:00")
+        rest_end = tk.StringVar(value="07:00")
+        group_name = tk.StringVar()
+        notes = tk.StringVar()
+        active = tk.BooleanVar(value=True)
+        ready = tk.BooleanVar(value=False)
+        progress = tk.StringVar(value="Escolha um número e clique em Iniciar aquecimento.")
+
+        for label, variable in [
+            ("Nome para identificar o número", display_name),
+            ("Telefone do número", phone),
+            ("ID do número na Meta", phone_number_id),
+            ("Tipo de envio deste número", provider),
+        ]:
+            self._entry(form, label, variable).pack(fill="x", pady=(0, 8))
+
+        for label, variable, values in [
+            ("Status", status, ("testing", "healthy", "paused", "auto_paused", "restricted", "banned")),
+            ("Qualidade", quality, ("unknown", "high", "medium", "low")),
+        ]:
+            holder = ttk.Frame(form, style="Panel.TFrame")
+            holder.pack(fill="x", pady=(0, 8))
+            ttk.Label(holder, text=label, style="Panel.TLabel").pack(anchor="w", pady=(0, 4))
+            ttk.Combobox(holder, textvariable=variable, values=values).pack(fill="x")
+
+        for label, variable in [
+            ("Limite da conta", messaging_limit),
+            ("Começar com envios por dia", daily_target),
+            ("Limite máximo por dia", max_daily_target),
+            ("Não enviar de HH:MM", rest_start),
+            ("Voltar a enviar em HH:MM", rest_end),
+            ("Notas", notes),
+        ]:
+            self._entry(form, label, variable).pack(fill="x", pady=(0, 8))
+
+        ttk.Checkbutton(form, text="Número ativo", variable=active).pack(anchor="w")
+        ttk.Checkbutton(form, text="Já pode usar em campanhas", variable=ready).pack(anchor="w", pady=(0, 8))
+
+        holder = ttk.Frame(form, style="Panel.TFrame")
+        holder.pack(fill="x", pady=(4, 8))
+        ttk.Label(holder, text="Grupo de clientes para testar", style="Panel.TLabel").pack(anchor="w", pady=(0, 4))
+        groups = [""] + contacts.list_groups()
+        ttk.Combobox(holder, textvariable=group_name, values=groups).pack(fill="x")
+        ttk.Label(form, textvariable=progress, style="Muted.TLabel", wraplength=310).pack(anchor="w", pady=(0, 8))
+
+        def selected_number_id() -> int | None:
+            if not tree.selection():
+                messagebox.showwarning(APP_TITLE, "Escolha um número primeiro.")
+                return None
+            return int(tree.item(tree.selection()[0], "values")[0])
+
+        def clear_form() -> None:
+            selected_id.set(0)
+            for variable in (display_name, phone, phone_number_id, notes):
+                variable.set("")
+            provider.set("oficial")
+            status.set("testing")
+            quality.set("unknown")
+            messaging_limit.set("250")
+            daily_target.set("20")
+            max_daily_target.set("500")
+            rest_start.set("00:00")
+            rest_end.set("07:00")
+            active.set(True)
+            ready.set(False)
+
+        def refresh() -> None:
+            tree.delete(*tree.get_children())
+            for item in warmup.list_numbers():
+                tree.insert(
+                    "",
+                    "end",
+                    values=(
+                        item["id"],
+                        item["display_name"],
+                        item["phone"],
+                        friendly_status(item["status"]),
+                        item.get("health_score") or 85,
+                        friendly_status(item["quality_rating"]),
+                        item.get("current_daily_target") or item["daily_target"],
+                        item.get("sent_today") or 0,
+                        f"{item['rest_start']}-{item['rest_end']}",
+                        "Sim" if item["ready_for_campaigns"] else "Nao",
+                    ),
+                )
+            event_tree.delete(*event_tree.get_children())
+            for event in warmup.list_recent_events():
+                event_tree.insert(
+                    "",
+                    "end",
+                    values=(
+                        event["created_at"],
+                        event["number_name"],
+                        event["recipient_name"],
+                        event["phone"],
+                        friendly_status(event["status"]),
+                        event["error_message"],
+                    ),
+                )
+
+        def on_select(_event: object) -> None:
+            number_id = selected_number_id()
+            if not number_id:
+                return
+            data = warmup.get_number(number_id)
+            if not data:
+                return
+            selected_id.set(int(data["id"]))
+            display_name.set(str(data["display_name"]))
+            phone.set(str(data["phone"]))
+            phone_number_id.set(str(data.get("phone_number_id") or ""))
+            provider.set(str(data.get("provider") or "oficial"))
+            status.set(str(data.get("status") or "testing"))
+            quality.set(str(data.get("quality_rating") or "unknown"))
+            messaging_limit.set(str(data.get("messaging_limit") or "250"))
+            daily_target.set(str(data.get("daily_target") or "10"))
+            max_daily_target.set(str(data.get("max_daily_target") or "100"))
+            rest_start.set(str(data.get("rest_start") or "22:00"))
+            rest_end.set(str(data.get("rest_end") or "08:00"))
+            notes.set(str(data.get("notes") or ""))
+            active.set(bool(data.get("active")))
+            ready.set(bool(data.get("ready_for_campaigns")))
+
+        def save() -> None:
+            try:
+                if selected_id.get():
+                    warmup.update_number(
+                        selected_id.get(),
+                        display_name=display_name.get(),
+                        phone=phone.get(),
+                        phone_number_id=phone_number_id.get(),
+                        provider=provider.get(),
+                        status=status.get(),
+                        quality_rating=quality.get(),
+                        messaging_limit=messaging_limit.get(),
+                        daily_target=daily_target.get(),
+                        max_daily_target=max_daily_target.get(),
+                        active=active.get(),
+                        ready_for_campaigns=ready.get(),
+                        rest_start=rest_start.get(),
+                        rest_end=rest_end.get(),
+                        notes=notes.get(),
+                    )
+                else:
+                    selected_id.set(
+                        warmup.add_number(
+                            display_name.get(),
+                            phone.get(),
+                            phone_number_id.get(),
+                            provider.get(),
+                            status.get(),
+                            quality.get(),
+                            int(float(messaging_limit.get().replace(",", "."))),
+                            int(float(daily_target.get().replace(",", "."))),
+                            int(float(max_daily_target.get().replace(",", "."))),
+                            active.get(),
+                            rest_start.get(),
+                            rest_end.get(),
+                            notes.get(),
+                        )
+                    )
+            except (ValueError, warmup.WarmupError) as exc:
+                messagebox.showerror(APP_TITLE, str(exc))
+                return
+            refresh()
+            self._set_status("Número salvo.")
+
+        def delete() -> None:
+            number_id = selected_number_id()
+            if not number_id:
+                return
+            if messagebox.askyesno(APP_TITLE, "Excluir este número e o histórico dele?"):
+                warmup.delete_number(number_id)
+                clear_form()
+                refresh()
+
+        def start() -> None:
+            number_id = selected_number_id()
+            if number_id:
+                self._start_number_warmup_thread(number_id, group_name.get(), progress)
+
+        def stop() -> None:
+            number_id = selected_number_id()
+            if not number_id:
+                return
+            event = self.running_warmups.get(number_id)
+            if event:
+                event.set()
+                progress.set("Pausa solicitada.")
+
+        tree.bind("<<TreeviewSelect>>", on_select)
+        actions = ttk.Frame(form, style="Panel.TFrame")
+        actions.pack(fill="x", pady=(6, 0))
+        ttk.Button(actions, text="Novo", command=clear_form).grid(row=0, column=0, sticky="ew", pady=(0, 6))
+        ttk.Button(actions, text="Salvar", style="Accent.TButton", command=save).grid(row=0, column=1, sticky="ew", padx=(8, 0), pady=(0, 6))
+        ttk.Button(actions, text="Iniciar aquecimento", style="Accent.TButton", command=start).grid(row=1, column=0, sticky="ew", pady=(0, 6))
+        ttk.Button(actions, text="Pausar", command=stop).grid(row=1, column=1, sticky="ew", padx=(8, 0), pady=(0, 6))
+        ttk.Button(actions, text="Excluir", command=delete).grid(row=2, column=0, sticky="ew")
+        ttk.Button(actions, text="Atualizar", command=refresh).grid(row=2, column=1, sticky="ew", padx=(8, 0))
+        actions.columnconfigure(0, weight=1)
+        actions.columnconfigure(1, weight=1)
+        refresh()
+
     def show_settings(self) -> None:
-        frame = self._screen("Configurações da conta/API")
+        frame = self._screen("Configurações")
         frame = self._scrollable_frame(frame)
         config = whatsapp.load_config()
 
@@ -812,7 +1125,12 @@ class MezzoldApp(tk.Tk):
         api_version = tk.StringVar(value=config.api_version)
         default_template = tk.StringVar(value=config.default_template)
         default_language = tk.StringVar(value=config.default_language)
-        delivery_mode = tk.StringVar(value=config.delivery_mode)
+        delivery_modes = {
+            "Envio oficial pela Meta": "official_api",
+            "Modo manual com link": "manual_assisted",
+        }
+        delivery_mode_labels = {value: label for label, value in delivery_modes.items()}
+        delivery_mode = tk.StringVar(value=delivery_mode_labels.get(config.delivery_mode, "Envio oficial pela Meta"))
         dry_run = tk.BooleanVar(value=config.dry_run)
         block_high_risk = tk.BooleanVar(value=get_setting("block_high_risk_campaigns", "1") == "1")
         smart_send = tk.BooleanVar(value=get_setting("smart_send_enabled", "0") == "1")
@@ -826,86 +1144,101 @@ class MezzoldApp(tk.Tk):
         smart_pause_max = tk.StringVar(value=get_setting("smart_pause_max_seconds", "300"))
         smart_daily_limit = tk.StringVar(value=get_setting("smart_daily_limit", "100"))
         smart_max_session = tk.StringVar(value=get_setting("smart_max_session_minutes", "90"))
+        rampup_min_interval = tk.StringVar(value=get_setting("rampup_min_interval_seconds", "45"))
+        rampup_max_interval = tk.StringVar(value=get_setting("rampup_max_interval_seconds", "180"))
+        rampup_daily_floor = tk.StringVar(value=get_setting("rampup_daily_floor", "5"))
         company_name = tk.StringVar(value=get_setting("company_name", "Mezzold"))
-        internet_status = tk.StringVar(value="Conexão com internet: ainda não verificada.")
+        internet_status = tk.StringVar(value="Internet: ainda não testada.")
 
-        ttk.Label(left, text="WhatsApp Business Cloud API", style="Panel.TLabel", font=("Segoe UI Semibold", 12)).pack(anchor="w")
+        ttk.Label(left, text="Envio pelo WhatsApp oficial", style="Panel.TLabel", font=("Segoe UI Semibold", 12)).pack(anchor="w")
         internet_panel = ttk.Frame(left, style="Panel.TFrame")
         internet_panel.pack(fill="x", pady=(8, 0))
         ttk.Label(
             internet_panel,
-            text="É obrigatório estar conectado à internet para enviar, abrir links wa.me e usar a API.",
+            text="Para enviar mensagens, abrir WhatsApp manual ou usar a API oficial, este computador precisa estar online.",
             style="Muted.TLabel",
             wraplength=520,
         ).pack(anchor="w")
         ttk.Label(internet_panel, textvariable=internet_status, style="Panel.TLabel").pack(side="left", pady=(8, 0))
-        ttk.Button(internet_panel, text="Testar conexão", command=lambda: self._update_internet_status(internet_status)).pack(side="right", pady=(8, 0))
+        ttk.Button(internet_panel, text="Testar internet", command=lambda: self._update_internet_status(internet_status)).pack(side="right", pady=(8, 0))
         mode_frame = ttk.Frame(left, style="Panel.TFrame")
         mode_frame.pack(fill="x", pady=(10, 0))
-        ttk.Label(mode_frame, text="Modo de envio", style="Panel.TLabel").pack(anchor="w", pady=(0, 4))
+        ttk.Label(mode_frame, text="Como o app deve enviar", style="Panel.TLabel").pack(anchor="w", pady=(0, 4))
         ttk.Combobox(
             mode_frame,
             textvariable=delivery_mode,
-            values=("official_api", "manual_assisted"),
+            values=tuple(delivery_modes.keys()),
             state="readonly",
         ).pack(fill="x")
         warning = (
-            "manual_assisted não automatiza disparos: gera link wa.me e registra pendência manual. "
-            "Qualquer automação fora da API oficial pode violar políticas e bloquear números."
+            "Modo manual abre um link do WhatsApp para você concluir o envio. "
+            "Envio automático real deve usar a API oficial para reduzir risco de bloqueio."
         )
         ttk.Label(left, text=warning, style="Muted.TLabel", wraplength=430).pack(anchor="w", pady=(8, 0))
         for label, variable in [
-            ("Token novo (em branco mantém o atual)", token),
-            ("ID do número WhatsApp Business", phone_number_id),
-            ("ID da conta/WABA", business_account_id),
+            ("Token da Meta (deixe em branco para manter o atual)", token),
+            ("ID do número no WhatsApp Business", phone_number_id),
+            ("ID da conta empresarial da Meta", business_account_id),
             ("Webhook", webhook_url),
-            ("Versão da Graph API", api_version),
-            ("Template padrão aprovado", default_template),
-            ("Idioma padrão", default_language),
+            ("Versão da API da Meta", api_version),
+            ("Modelo aprovado padrão", default_template),
+            ("Idioma padrão do modelo", default_language),
         ]:
             self._entry(left, label, variable, show="*" if label.startswith("Token") else None).pack(fill="x", pady=(10, 0))
-        ttk.Checkbutton(left, text="Modo seguro: simular envio sem chamar a API", variable=dry_run).pack(anchor="w", pady=(14, 0))
-        ttk.Checkbutton(left, text="Bloquear campanhas com risco crítico", variable=block_high_risk).pack(anchor="w", pady=(8, 0))
+        ttk.Checkbutton(left, text="Modo teste: registrar sem enviar de verdade", variable=dry_run).pack(anchor="w", pady=(14, 0))
+        ttk.Checkbutton(left, text="Impedir envio quando o risco estiver muito alto", variable=block_high_risk).pack(anchor="w", pady=(8, 0))
         ttk.Checkbutton(
             left,
-            text="Iniciar automaticamente com o Windows",
+            text="Começar sozinho quando ligar o computador",
             variable=start_with_windows,
         ).pack(anchor="w", pady=(8, 0))
         ttk.Checkbutton(
             left,
-            text="Disparo inteligente: cadência variável e pausas conservadoras",
+            text="Usar pausas automáticas entre mensagens",
             variable=smart_send,
         ).pack(anchor="w", pady=(8, 0))
         smart_note = (
-            "Exige pelo menos 3 mensagens diferentes por campanha. "
-            "Não embaralha letras/palavras e não garante ausência de bloqueio."
+            "Use pelo menos 3 versões de mensagem. Isso deixa o envio mais natural, mas não garante que a conta nunca será bloqueada."
         )
         ttk.Label(left, text=smart_note, style="Muted.TLabel", wraplength=430).pack(anchor="w", pady=(6, 0))
 
-        ttk.Label(right, text="Conta, limites e produto", style="Panel.TLabel", font=("Segoe UI Semibold", 12)).pack(anchor="w")
+        ttk.Label(right, text="Dados gerais e limites", style="Panel.TLabel", font=("Segoe UI Semibold", 12)).pack(anchor="w")
         for label, variable in [
-            ("Empresa", company_name),
+            ("Nome da empresa", company_name),
             ("Intervalo entre envios (segundos)", interval),
-            ("Limite diário de envios", daily_limit),
+            ("Máximo de envios por dia", daily_limit),
         ]:
             self._entry(right, label, variable).pack(fill="x", pady=(10, 0))
 
-        ttk.Label(right, text="Disparo inteligente", style="Panel.TLabel", font=("Segoe UI Semibold", 12)).pack(anchor="w", pady=(18, 0))
+        ttk.Label(right, text="Pausas automáticas", style="Panel.TLabel", font=("Segoe UI Semibold", 12)).pack(anchor="w", pady=(18, 0))
         smart_grid = ttk.Frame(right, style="Panel.TFrame")
         smart_grid.pack(fill="x")
         smart_fields = [
-            ("Intervalo mínimo (s)", smart_min_interval),
-            ("Intervalo máximo (s)", smart_max_interval),
+            ("Espera mínima (s)", smart_min_interval),
+            ("Espera máxima (s)", smart_max_interval),
             ("Pausa a cada X envios", smart_pause_every),
-            ("Pausa mínima (s)", smart_pause_min),
-            ("Pausa máxima (s)", smart_pause_max),
-            ("Limite diário inteligente", smart_daily_limit),
-            ("Janela máxima (min)", smart_max_session),
+            ("Pausa curta mínima (s)", smart_pause_min),
+            ("Pausa curta máxima (s)", smart_pause_max),
+            ("Máximo diário neste modo", smart_daily_limit),
+            ("Tempo máximo seguido (min)", smart_max_session),
         ]
         for index, (label, variable) in enumerate(smart_fields):
             holder = ttk.Frame(smart_grid, style="Panel.TFrame")
             holder.grid(row=index // 2, column=index % 2, sticky="ew", padx=(0 if index % 2 == 0 else 8, 0), pady=(10, 0))
             smart_grid.columnconfigure(index % 2, weight=1)
+            self._entry(holder, label, variable).pack(fill="x")
+
+        ttk.Label(right, text="Aquecimento dos números", style="Panel.TLabel", font=("Segoe UI Semibold", 12)).pack(anchor="w", pady=(18, 0))
+        rampup_grid = ttk.Frame(right, style="Panel.TFrame")
+        rampup_grid.pack(fill="x")
+        for index, (label, variable) in enumerate([
+            ("Espera mínima entre testes (s)", rampup_min_interval),
+            ("Espera máxima entre testes (s)", rampup_max_interval),
+            ("Envios bons para liberar número", rampup_daily_floor),
+        ]):
+            holder = ttk.Frame(rampup_grid, style="Panel.TFrame")
+            holder.grid(row=index // 2, column=index % 2, sticky="ew", padx=(0 if index % 2 == 0 else 8, 0), pady=(10, 0))
+            rampup_grid.columnconfigure(index % 2, weight=1)
             self._entry(holder, label, variable).pack(fill="x")
 
         license_data = self._load_license()
@@ -914,7 +1247,7 @@ class MezzoldApp(tk.Tk):
         license_until = tk.StringVar(value=str(license_data.get("valid_until", "")))
         ttk.Label(right, text="Licença", style="Panel.TLabel", font=("Segoe UI Semibold", 12)).pack(anchor="w", pady=(20, 0))
         for label, variable in [
-            ("Chave de licença", license_key),
+            ("Código da licença", license_key),
             ("Plano", license_plan),
             ("Validade", license_until),
         ]:
@@ -929,7 +1262,7 @@ class MezzoldApp(tk.Tk):
                     webhook_url=webhook_url.get(),
                     default_template=default_template.get(),
                     default_language=default_language.get(),
-                    delivery_mode=delivery_mode.get(),
+                    delivery_mode=delivery_modes.get(delivery_mode.get(), "official_api"),
                     dry_run=dry_run.get(),
                     send_interval_seconds=float(interval.get().replace(",", ".")),
                     daily_send_limit=int(float(daily_limit.get().replace(",", "."))),
@@ -953,11 +1286,16 @@ class MezzoldApp(tk.Tk):
                     smart_daily_limit.get(),
                     smart_max_session.get(),
                 )
+                self._save_rampup_settings(
+                    rampup_min_interval.get(),
+                    rampup_max_interval.get(),
+                    rampup_daily_floor.get(),
+                )
                 self._save_license(license_key.get(), license_plan.get(), license_until.get())
             except (ValueError, RuntimeError, whatsapp.WhatsAppAPIError) as exc:
                 messagebox.showerror(APP_TITLE, str(exc))
                 return
-            messagebox.showinfo(APP_TITLE, "Configurações salvas com confirmação em duas etapas.")
+            messagebox.showinfo(APP_TITLE, "Configurações salvas.")
 
         def backup() -> None:
             destination = filedialog.asksaveasfilename(
@@ -973,7 +1311,7 @@ class MezzoldApp(tk.Tk):
         actions = ttk.Frame(right, style="Panel.TFrame")
         actions.pack(fill="x", pady=(18, 0))
         action_buttons = [
-            ("Salvar alterações", save, "Accent.TButton"),
+            ("Salvar configurações", save, "Accent.TButton"),
             ("Criar backup", backup, "TButton"),
             ("Política oficial do WhatsApp", lambda: self._open_external_link(WHATSAPP_POLICY_URL), "TButton"),
             ("Documentação Cloud API", lambda: self._open_external_link(META_CLOUD_API_URL), "TButton"),
@@ -986,7 +1324,7 @@ class MezzoldApp(tk.Tk):
 
         about = (
             f"{APP_TITLE} {APP_VERSION}\n"
-            "Produto desktop local com SQLite, opt-in, blacklist, templates aprovados, logs e bloqueio de risco."
+            "Aplicativo local para cuidar de clientes, campanhas, aquecimento de números, histórico e segurança dos envios."
         )
         ttk.Label(right, text=about, style="Muted.TLabel", wraplength=430).pack(anchor="w", pady=(20, 0))
 
@@ -1002,19 +1340,30 @@ class MezzoldApp(tk.Tk):
         max_session: str,
     ) -> None:
         values = {
-            "smart_min_interval_seconds": self._positive_int(min_interval, "Intervalo mínimo", 1),
-            "smart_max_interval_seconds": self._positive_int(max_interval, "Intervalo máximo", 1),
+            "smart_min_interval_seconds": self._positive_int(min_interval, "Espera mínima", 1),
+            "smart_max_interval_seconds": self._positive_int(max_interval, "Espera máxima", 1),
             "smart_pause_every": self._positive_int(pause_every, "Pausa a cada X envios", 1),
             "smart_pause_min_seconds": self._positive_int(pause_min, "Pausa mínima", 0),
             "smart_pause_max_seconds": self._positive_int(pause_max, "Pausa máxima", 0),
-            "smart_daily_limit": self._positive_int(daily_limit, "Limite diário inteligente", 1),
-            "smart_max_session_minutes": self._positive_int(max_session, "Janela máxima", 5),
+            "smart_daily_limit": self._positive_int(daily_limit, "Máximo diário", 1),
+            "smart_max_session_minutes": self._positive_int(max_session, "Tempo máximo seguido", 5),
         }
         if values["smart_max_interval_seconds"] < values["smart_min_interval_seconds"]:
-            raise ValueError("O intervalo máximo precisa ser maior ou igual ao mínimo.")
+            raise ValueError("A espera máxima precisa ser igual ou maior que a espera mínima.")
         if values["smart_pause_max_seconds"] < values["smart_pause_min_seconds"]:
-            raise ValueError("A pausa máxima precisa ser maior ou igual à mínima.")
+            raise ValueError("A pausa máxima precisa ser igual ou maior que a pausa mínima.")
         set_setting("smart_send_enabled", "1" if enabled else "0")
+        for key, value in values.items():
+            set_setting(key, str(value))
+
+    def _save_rampup_settings(self, min_interval: str, max_interval: str, daily_floor: str) -> None:
+        values = {
+            "rampup_min_interval_seconds": self._positive_int(min_interval, "Espera mínima do aquecimento", 1),
+            "rampup_max_interval_seconds": self._positive_int(max_interval, "Espera máxima do aquecimento", 1),
+            "rampup_daily_floor": self._positive_int(daily_floor, "Envios bons para liberar número", 1),
+        }
+        if values["rampup_max_interval_seconds"] < values["rampup_min_interval_seconds"]:
+            raise ValueError("A espera máxima do aquecimento precisa ser igual ou maior que a mínima.")
         for key, value in values.items():
             set_setting(key, str(value))
 
@@ -1022,25 +1371,25 @@ class MezzoldApp(tk.Tk):
         try:
             parsed = int(float(value.replace(",", ".")))
         except ValueError as exc:
-            raise ValueError(f"{label} precisa ser um número.") from exc
+            raise ValueError(f"{label}: informe apenas números.") from exc
         if parsed < minimum:
-            raise ValueError(f"{label} precisa ser maior ou igual a {minimum}.")
+            raise ValueError(f"{label}: use um valor igual ou maior que {minimum}.")
         return parsed
 
     def _update_internet_status(self, status_var: tk.StringVar) -> None:
-        status_var.set("Verificando conexão...")
+        status_var.set("Testando internet...")
         self.update_idletasks()
         if network.has_internet():
-            status_var.set("Conexão com internet: OK.")
+            status_var.set("Internet: funcionando.")
         else:
-            status_var.set("Conexão com internet: indisponível.")
+            status_var.set("Internet: sem conexão no momento.")
 
     def _require_internet(self) -> bool:
         if network.has_internet():
             return True
         messagebox.showerror(
             APP_TITLE,
-            "É necessário estar conectado à internet para enviar campanhas ou abrir links do WhatsApp.",
+            "Este computador precisa estar conectado à internet para enviar mensagens ou abrir links do WhatsApp.",
         )
         return False
 
@@ -1050,12 +1399,12 @@ class MezzoldApp(tk.Tk):
 
     def _confirm_settings_save(self) -> bool:
         if not self.current_user:
-            messagebox.showerror(APP_TITLE, "Faça login novamente para salvar configurações.")
+            messagebox.showerror(APP_TITLE, "Entre de novo para salvar as configurações.")
             return False
 
         code = f"{secrets.randbelow(900000) + 100000}"
         dialog = tk.Toplevel(self)
-        dialog.title("Confirmar alterações")
+        dialog.title("Confirmar salvamento")
         dialog.transient(self)
         dialog.grab_set()
         dialog.resizable(False, False)
@@ -1068,25 +1417,25 @@ class MezzoldApp(tk.Tk):
         panel.pack(fill="both", expand=True)
         ttk.Label(
             panel,
-            text="Confirmação em duas etapas",
+            text="Confirme antes de salvar",
             font=("Segoe UI Semibold", 12),
         ).pack(anchor="w")
         ttk.Label(
             panel,
-            text="Para salvar configurações sensíveis, informe sua senha e digite o código abaixo.",
+            text="Para proteger a conta, digite sua senha e copie o código mostrado abaixo.",
             wraplength=360,
         ).pack(anchor="w", pady=(8, 10))
         ttk.Label(panel, text=f"Código: {code}", font=("Segoe UI Semibold", 13)).pack(anchor="w", pady=(0, 10))
-        self._entry(panel, "Senha atual", password, show="*").pack(fill="x", pady=(0, 10))
-        self._entry(panel, "Digite o código", typed_code).pack(fill="x", pady=(0, 14))
+        self._entry(panel, "Sua senha", password, show="*").pack(fill="x", pady=(0, 10))
+        self._entry(panel, "Código de confirmação", typed_code).pack(fill="x", pady=(0, 14))
 
         def confirm() -> None:
             user = auth.authenticate(self.current_user.username, password.get())
             if not user:
-                messagebox.showerror(APP_TITLE, "Senha inválida.", parent=dialog)
+                messagebox.showerror(APP_TITLE, "Senha não confere.", parent=dialog)
                 return
             if typed_code.get().strip() != code:
-                messagebox.showerror(APP_TITLE, "Código inválido.", parent=dialog)
+                messagebox.showerror(APP_TITLE, "Código não confere.", parent=dialog)
                 return
             result["ok"] = True
             dialog.destroy()
@@ -1094,7 +1443,7 @@ class MezzoldApp(tk.Tk):
         buttons = ttk.Frame(panel)
         buttons.pack(fill="x")
         ttk.Button(buttons, text="Cancelar", command=dialog.destroy).pack(side="right")
-        ttk.Button(buttons, text="Confirmar e salvar", style="Accent.TButton", command=confirm).pack(side="right", padx=(0, 8))
+        ttk.Button(buttons, text="Salvar agora", style="Accent.TButton", command=confirm).pack(side="right", padx=(0, 8))
 
         dialog.bind("<Return>", lambda _event: confirm())
         dialog.wait_window()
@@ -1150,7 +1499,7 @@ class MezzoldApp(tk.Tk):
                 values=(
                     item["id"],
                     item["name"],
-                    item["status"],
+                    friendly_status(item["status"]),
                     f"{item.get('risk_score') or 0}%",
                     item["scheduled_at"] or "",
                     item["total_contacts"] or 0,
@@ -1167,13 +1516,13 @@ class MezzoldApp(tk.Tk):
         internet_alert: bool = True,
     ) -> None:
         if campaign_id in self.running_events:
-            messagebox.showinfo(APP_TITLE, "Esta campanha já está em envio.")
+            messagebox.showinfo(APP_TITLE, "Esta campanha já está sendo enviada.")
             return
         if not network.has_internet():
             if internet_alert:
                 self._require_internet()
             else:
-                self._set_status("Campanhas aguardando conexão com a internet.")
+                self._set_status("Envios pausados: sem internet no momento.")
             return
 
         risk = compliance.refresh_campaign_risk(campaign_id)
@@ -1181,7 +1530,7 @@ class MezzoldApp(tk.Tk):
             notes = "\n".join(f"- {note}" for note in risk["notes"][:4])
             proceed = messagebox.askyesno(
                 APP_TITLE,
-                f"Risco desta campanha: {risk['score']}% ({risk['level']}).\n\n{notes}\n\nContinuar mesmo assim?",
+                f"Esta campanha precisa de atenção: {risk['score']}% de risco ({risk['level']}).\n\n{notes}\n\nDeseja enviar mesmo assim?",
             )
             if not proceed:
                 return
@@ -1211,13 +1560,60 @@ class MezzoldApp(tk.Tk):
                 self.after(0, self._refresh_current_screen)
 
         threading.Thread(target=worker, daemon=True).start()
-        self._set_status(f"Campanha #{campaign_id} em envio.")
+        self._set_status(f"Enviando campanha #{campaign_id}.")
+
+    def _start_number_warmup_thread(
+        self,
+        number_id: int,
+        group_name: str = "",
+        progress_var: tk.StringVar | None = None,
+    ) -> None:
+        if number_id in self.running_warmups:
+            messagebox.showinfo(APP_TITLE, "Este número já está em aquecimento.")
+            return
+        if not whatsapp.load_config().dry_run and not network.has_internet():
+            self._require_internet()
+            return
+
+        event = threading.Event()
+        self.running_warmups[number_id] = event
+
+        def progress(current: int, total: int, message: str) -> None:
+            text = f"{current}/{total} - {message}"
+            self.after(0, lambda: self._set_status(text))
+            if progress_var:
+                self.after(0, lambda: progress_var.set(text))
+
+        def worker() -> None:
+            try:
+                totals = warmup.run_number_rampup(
+                    number_id,
+                    group_name=group_name,
+                    progress_callback=progress,
+                    stop_event=event,
+                )
+                done = (
+                    f"Número #{number_id}: enviados {totals['sent']}, "
+                    f"simulados {totals['simulated']}, manuais {totals['manual']}, "
+                    f"falhas {totals['failed']}."
+                )
+                self.after(0, lambda: self._set_status(done))
+                if progress_var:
+                    self.after(0, lambda: progress_var.set(done))
+            except warmup.WarmupError as exc:
+                self.after(0, lambda: messagebox.showerror(APP_TITLE, str(exc)))
+            finally:
+                self.running_warmups.pop(number_id, None)
+                self.after(0, self._refresh_current_screen)
+
+        threading.Thread(target=worker, daemon=True).start()
+        self._set_status(f"Aquecendo número #{number_id}.")
 
     def _send_due_campaigns(self, quiet: bool = False) -> None:
         due = campaigns.get_due_campaigns()
         if not due:
             if not quiet:
-                self._set_status("Nenhuma campanha agendada para agora.")
+                self._set_status("Não há campanha para enviar agora.")
             return
         for campaign in due:
             self._start_campaign_thread(int(campaign["id"]), interactive=False, internet_alert=not quiet)
@@ -1227,11 +1623,11 @@ class MezzoldApp(tk.Tk):
         if not resumable:
             return
         if not network.has_internet():
-            self._set_status("Há campanhas interrompidas aguardando conexão com a internet.")
+            self._set_status("Há campanhas pausadas aguardando internet.")
             return
         for campaign in resumable:
             self._start_campaign_thread(int(campaign["id"]), interactive=False, internet_alert=False)
-        self._set_status(f"Retomando {len(resumable)} campanha(s) em andamento.")
+        self._set_status(f"Retomando {len(resumable)} campanha(s) que estavam paradas.")
 
     def _scheduler_tick(self) -> None:
         if self.current_user:
@@ -1239,13 +1635,15 @@ class MezzoldApp(tk.Tk):
             self.after(60000, self._scheduler_tick)
 
     def _refresh_current_screen(self) -> None:
-        if self.current_screen == "Dashboard":
+        if self.current_screen == "Início":
             self.show_dashboard()
-        elif self.current_screen == "Agendar envio":
+        elif self.current_screen == "Agenda de envios":
             self.show_schedule()
-        elif self.current_screen == "Risco de banimento":
+        elif self.current_screen == "Aquecimento dos números":
+            self.show_number_health()
+        elif self.current_screen == "Conferir risco":
             self.show_risk()
-        elif self.current_screen == "Histórico":
+        elif self.current_screen == "Histórico de envios":
             self.show_history()
 
 

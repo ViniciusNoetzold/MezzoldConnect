@@ -35,11 +35,11 @@ def create_campaign(
     message = message.strip()
     contact_ids = sorted(set(int(contact_id) for contact_id in contact_ids))
     if not name:
-        raise CampaignError("Informe o nome da campanha.")
+        raise CampaignError("Dê um nome para a campanha.")
     if not message and not template_name.strip():
-        raise CampaignError("Informe a mensagem ou o template aprovado.")
+        raise CampaignError("Escreva a mensagem ou informe o modelo aprovado na Meta.")
     if not contact_ids:
-        raise CampaignError("Selecione pelo menos um contato.")
+        raise CampaignError("Escolha pelo menos um cliente autorizado.")
 
     timestamp = now_text()
     status = "agendada" if scheduled_at else "rascunho"
@@ -184,7 +184,7 @@ def get_campaign_contacts(campaign_id: int) -> list[dict[str, Any]]:
 
 def schedule_campaign(campaign_id: int, scheduled_at: str) -> None:
     if not scheduled_at.strip():
-        raise CampaignError("Informe data e horário do agendamento.")
+        raise CampaignError("Informe a data e o horário do envio.")
     with connect() as conn:
         conn.execute(
             """
@@ -414,26 +414,26 @@ def send_campaign(
 ) -> dict[str, int]:
     campaign = get_campaign(campaign_id)
     if not campaign:
-        raise CampaignError("Campanha não encontrada.")
+        raise CampaignError("Não encontrei essa campanha.")
     if campaign["status"] == "cancelada":
-        raise CampaignError("Campanha cancelada não pode ser enviada.")
+        raise CampaignError("Essa campanha foi cancelada e não pode ser enviada.")
 
     risk = compliance.refresh_campaign_risk(campaign_id)
     if get_setting("block_high_risk_campaigns", "1") == "1" and int(risk["score"]) >= 75:
         raise CampaignError(
-            f"Campanha bloqueada por risco {risk['score']}% ({risk['level']}). "
-            "Revise opt-in, template, blacklist e volume antes de enviar."
+            f"Campanha bloqueada por risco alto: {risk['score']}% ({risk['level']}). "
+            "Revise autorizações, contatos bloqueados, mensagem e quantidade antes de enviar."
         )
 
     client = client or WhatsAppBusinessClient()
     config = load_config()
     contacts = get_campaign_contacts(campaign_id)
     if not contacts:
-        raise CampaignError("A campanha não tem contatos.")
+        raise CampaignError("Essa campanha não tem clientes selecionados.")
 
     variants = get_campaign_variants(campaign_id)
     if smart_send_enabled() and len({str(item.get("body") or "").strip() for item in variants if item.get("body")}) < 3:
-        raise CampaignError("O disparo inteligente exige no mínimo 3 mensagens diferentes na campanha.")
+        raise CampaignError("Para usar pausas automáticas, cadastre pelo menos 3 versões de mensagem.")
 
     totals = {
         "enviado": 0,
