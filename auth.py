@@ -73,7 +73,7 @@ def user_count() -> int:
 def create_user(username: str, password: str) -> User:
     username = username.strip()
     if not username:
-        raise AuthError("Informe um usuário.")
+        raise AuthError("Informe um nome de usuário.")
     if len(password) < 8:
         raise AuthError("A senha precisa ter pelo menos 8 caracteres.")
 
@@ -89,7 +89,7 @@ def create_user(username: str, password: str) -> User:
         except Exception as exc:
             message = str(exc).lower()
             if "unique" in message:
-                raise AuthError("Já existe um usuário com esse nome.") from exc
+                raise AuthError("Esse nome de usuário já está em uso.") from exc
             raise
 
     return User(id=int(cursor.lastrowid), username=username)

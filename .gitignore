@@ -4,6 +4,12 @@ __pycache__/
 venv/
 build/
 dist/
+logs/
+node_modules/
+coverage/
+*.spec
+installer/staging/
+installer/*.sed
 
 .env
 data/

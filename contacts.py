@@ -77,7 +77,7 @@ def add_contact(
     name = name.strip() or "Cliente"
     phone = normalize_phone(phone)
     if not is_valid_phone(phone):
-        raise ContactError("Número inválido. Use DDD e telefone, com ou sem +55.")
+        raise ContactError("Telefone inválido. Use DDD e número, com ou sem +55.")
 
     timestamp = now_text()
     opt_in_at = opt_in_at.strip() or (timestamp if opt_in else "")
@@ -122,7 +122,7 @@ def upsert_contact(
     name = name.strip() or "Cliente"
     phone = normalize_phone(phone)
     if not is_valid_phone(phone):
-        raise ContactError(f"Número inválido: {phone or 'vazio'}")
+        raise ContactError(f"Telefone inválido: {phone or 'vazio'}")
 
     timestamp = now_text()
     opt_in_at = opt_in_at.strip() or (timestamp if opt_in else "")
@@ -207,7 +207,7 @@ def update_contact(contact_id: int, **fields: object) -> None:
         if key == "phone":
             value = normalize_phone(str(value))
             if not is_valid_phone(str(value)):
-                raise ContactError("Número inválido. Use DDD e telefone, com ou sem +55.")
+                raise ContactError("Telefone inválido. Use DDD e número, com ou sem +55.")
         if key in {"opt_in", "blacklisted"}:
             value = int(bool(value))
             if key == "opt_in":
@@ -256,7 +256,7 @@ def mark_opt_out(contact_id: int, reason: str = "") -> None:
 def register_inbound_message(phone: str, opted_in: bool = True, source: str = "whatsapp") -> None:
     phone = normalize_phone(phone)
     if not is_valid_phone(phone):
-        raise ContactError("Número inválido.")
+        raise ContactError("Telefone inválido. Confira DDD e número.")
     timestamp = now_text()
     with connect() as conn:
         row = conn.execute("SELECT id FROM contacts WHERE phone = ?", (phone,)).fetchone()
@@ -318,7 +318,7 @@ def _read_csv(path: Path) -> list[dict[str, str]]:
         except UnicodeDecodeError:
             continue
     else:
-        raise ContactError("Não foi possível ler o arquivo CSV.")
+        raise ContactError("Não consegui ler o CSV. Tente salvar a planilha como UTF-8 ou importar em Excel .xlsx.")
 
     sample = text[:2048]
     try:
@@ -354,7 +354,7 @@ def _read_xlsx(path: Path) -> list[dict[str, str]]:
 
             root = ElementTree.fromstring(archive.read(sheet_name))
     except zipfile.BadZipFile as exc:
-        raise ContactError("Arquivo Excel inválido.") from exc
+        raise ContactError("Não consegui ler esse arquivo Excel.") from exc
 
     rows: list[list[str]] = []
     for row_node in root.findall(".//x:sheetData/x:row", XLSX_NS):
@@ -405,7 +405,7 @@ def _pick(row: dict[str, str], aliases: set[str]) -> str:
 def import_contacts(path_text: str) -> ImportSummary:
     path = Path(path_text)
     if not path.exists():
-        raise ContactError("Arquivo não encontrado.")
+        raise ContactError("Arquivo não encontrado. Escolha a planilha novamente.")
 
     suffix = path.suffix.lower()
     if suffix in {".csv", ".txt"}:
@@ -413,7 +413,7 @@ def import_contacts(path_text: str) -> ImportSummary:
     elif suffix == ".xlsx":
         rows = _read_xlsx(path)
     else:
-        raise ContactError("Use um arquivo CSV ou Excel (.xlsx).")
+        raise ContactError("Use uma planilha CSV ou Excel .xlsx.")
 
     summary = ImportSummary()
     seen: set[str] = set()
