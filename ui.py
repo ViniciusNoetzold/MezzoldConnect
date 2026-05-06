@@ -17,7 +17,7 @@ import network
 import startup
 import warmup
 import whatsapp
-from database import APP_TITLE, APP_VERSION, DB_PATH, connect, get_setting, row_to_dict, set_setting
+from database import APP_TITLE, APP_VERSION, DB_PATH, DEFAULT_CONTACT_FOLDER, connect, get_setting, row_to_dict, set_setting
 
 
 WHATSAPP_POLICY_URL = "https://www.whatsapp.com/legal/business-policy/"
@@ -961,11 +961,23 @@ class MezzoldApp(tk.Tk):
             command=lambda: path.set(filedialog.askopenfilename(filetypes=[("Planilhas", "*.csv *.txt *.xlsx"), ("Todos", "*.*")])),
         ).pack(side="left", padx=(8, 0))
 
-        folder = tk.StringVar(value=folder_name)
+        destination_folder = folder_name.strip() or DEFAULT_CONTACT_FOLDER
+        try:
+            contacts.create_folder(destination_folder)
+        except contacts.ContactError:
+            destination_folder = DEFAULT_CONTACT_FOLDER
+        folder = tk.StringVar(value=destination_folder)
         folder_row = ttk.Frame(panel, style="Panel.TFrame")
         folder_row.pack(fill="x", pady=(0, 12))
         ttk.Label(folder_row, text="Importar para pasta", style="Panel.TLabel").pack(side="left")
-        folder_combo = ttk.Combobox(folder_row, textvariable=folder, values=[""] + contacts.list_groups(), state="readonly")
+
+        def import_folder_values() -> list[str]:
+            values = contacts.list_groups()
+            if DEFAULT_CONTACT_FOLDER not in values:
+                values.insert(0, DEFAULT_CONTACT_FOLDER)
+            return values
+
+        folder_combo = ttk.Combobox(folder_row, textvariable=folder, values=import_folder_values(), state="readonly")
         folder_combo.pack(side="left", fill="x", expand=True, padx=(8, 8))
 
         def create_import_folder() -> None:
@@ -977,7 +989,7 @@ class MezzoldApp(tk.Tk):
             except contacts.ContactError as exc:
                 messagebox.showerror(APP_TITLE, str(exc))
                 return
-            folder_combo.configure(values=[""] + contacts.list_groups())
+            folder_combo.configure(values=import_folder_values())
             folder.set(folder_name.strip())
 
         ttk.Button(folder_row, text="Nova pasta", command=create_import_folder).pack(side="left")
@@ -985,20 +997,23 @@ class MezzoldApp(tk.Tk):
         ttk.Label(panel, textvariable=result, style="Panel.TLabel", wraplength=760).pack(anchor="w", pady=(0, 12))
 
         def do_import() -> None:
+            selected_folder = folder.get().strip() or DEFAULT_CONTACT_FOLDER
             try:
-                summary = contacts.import_contacts(path.get(), folder_name=folder.get())
+                contacts.create_folder(selected_folder)
+                summary = contacts.import_contacts(path.get(), folder_name=selected_folder)
             except contacts.ContactError as exc:
                 messagebox.showerror(APP_TITLE, str(exc))
                 return
             errors = "\n".join(summary.errors[:5])
             text = (
-                f"Novos clientes: {summary.imported} | Atualizados: {summary.updated} | "
-                f"Repetidos na planilha: {summary.duplicates} | Linhas ignoradas: {summary.skipped}"
+                f"Pasta de destino: {selected_folder}\n"
+                f"Contatos importados: {summary.imported} | Atualizados: {summary.updated} | "
+                f"Duplicados: {summary.duplicates} | Invalidos/ignorados: {summary.skipped}"
             )
             if errors:
                 text += f"\nO que revisar primeiro:\n{errors}"
             result.set(text)
-            self._set_status("Importação de clientes concluída.")
+            self._set_status(f"Importacao concluida em '{selected_folder}'.")
 
         ttk.Button(panel, text="Importar clientes", style="Accent.TButton", command=do_import).pack(anchor="w")
 
