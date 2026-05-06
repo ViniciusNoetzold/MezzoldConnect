@@ -8,7 +8,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from xml.etree import ElementTree
 
-from database import connect, now_text, row_to_dict, rows_to_dicts
+from database import DEFAULT_CONTACT_FOLDER, connect, now_text, row_to_dict, rows_to_dicts
 
 
 PHONE_RE = re.compile(r"\D+")
@@ -62,6 +62,60 @@ def parse_opt_in(value: object) -> int:
     return 1
 
 
+def normalize_folder_name(name: str) -> str:
+    return (name or "").strip() or DEFAULT_CONTACT_FOLDER
+
+
+def _get_or_create_folder_id(conn, folder_name: str) -> int:
+    folder_name = normalize_folder_name(folder_name)
+    timestamp = now_text()
+    conn.execute(
+        """
+        INSERT OR IGNORE INTO contact_folders (name, is_default, created_at, updated_at)
+        VALUES (?, ?, ?, ?)
+        """,
+        (
+            folder_name,
+            1 if folder_name.casefold() == DEFAULT_CONTACT_FOLDER.casefold() else 0,
+            timestamp,
+            timestamp,
+        ),
+    )
+    row = conn.execute("SELECT id FROM contact_folders WHERE name = ?", (folder_name,)).fetchone()
+    if not row:
+        raise ContactError("Não consegui criar a pasta de contatos.")
+    return int(row["id"])
+
+
+def _set_contact_primary_folder(conn, contact_id: int, folder_name: str) -> None:
+    folder_name = normalize_folder_name(folder_name)
+    folder_id = _get_or_create_folder_id(conn, folder_name)
+    timestamp = now_text()
+    conn.execute("DELETE FROM contact_folder_members WHERE contact_id = ?", (contact_id,))
+    conn.execute(
+        """
+        INSERT OR IGNORE INTO contact_folder_members (contact_id, folder_id, created_at)
+        VALUES (?, ?, ?)
+        """,
+        (contact_id, folder_id, timestamp),
+    )
+    conn.execute(
+        "UPDATE contacts SET group_name = ?, updated_at = ? WHERE id = ?",
+        (folder_name, timestamp, contact_id),
+    )
+
+
+def _add_contact_to_folder(conn, contact_id: int, folder_name: str) -> None:
+    folder_id = _get_or_create_folder_id(conn, folder_name)
+    conn.execute(
+        """
+        INSERT OR IGNORE INTO contact_folder_members (contact_id, folder_id, created_at)
+        VALUES (?, ?, ?)
+        """,
+        (contact_id, folder_id, now_text()),
+    )
+
+
 def add_contact(
     name: str,
     phone: str,
@@ -104,7 +158,9 @@ def add_contact(
                 timestamp,
             ),
         )
-    return int(cursor.lastrowid)
+        contact_id = int(cursor.lastrowid)
+        _set_contact_primary_folder(conn, contact_id, group_name)
+    return contact_id
 
 
 def upsert_contact(
@@ -129,6 +185,7 @@ def upsert_contact(
     with connect() as conn:
         existing = conn.execute("SELECT id FROM contacts WHERE phone = ?", (phone,)).fetchone()
         if existing:
+            contact_id = int(existing["id"])
             conn.execute(
                 """
                 UPDATE contacts
@@ -151,10 +208,11 @@ def upsert_contact(
                     consent_notes.strip(),
                     notes,
                     timestamp,
-                    existing["id"],
+                    contact_id,
                 ),
             )
-            return int(existing["id"]), True
+            _set_contact_primary_folder(conn, contact_id, group_name)
+            return contact_id, True
 
         cursor = conn.execute(
             """
@@ -178,7 +236,9 @@ def upsert_contact(
                 timestamp,
             ),
         )
-    return int(cursor.lastrowid), False
+        contact_id = int(cursor.lastrowid)
+        _set_contact_primary_folder(conn, contact_id, group_name)
+    return contact_id, False
 
 
 def update_contact(contact_id: int, **fields: object) -> None:
@@ -200,6 +260,7 @@ def update_contact(contact_id: int, **fields: object) -> None:
     updates: list[str] = []
     values: list[object] = []
     timestamp = now_text()
+    folder_name_to_apply: str | None = None
 
     for key, value in fields.items():
         if key not in allowed:
@@ -219,6 +280,9 @@ def update_contact(contact_id: int, **fields: object) -> None:
                 else:
                     updates.append("opt_out_at = COALESCE(opt_out_at, ?)")
                     values.append(timestamp)
+        if key == "group_name":
+            value = normalize_folder_name(str(value))
+            folder_name_to_apply = str(value)
         updates.append(f"{key} = ?")
         values.append(value)
 
@@ -234,6 +298,8 @@ def update_contact(contact_id: int, **fields: object) -> None:
             f"UPDATE contacts SET {', '.join(updates)} WHERE id = ?",
             tuple(values),
         )
+        if folder_name_to_apply is not None:
+            _set_contact_primary_folder(conn, contact_id, folder_name_to_apply)
 
 
 def delete_contact(contact_id: int) -> None:
@@ -272,7 +338,7 @@ def register_inbound_message(phone: str, opted_in: bool = True, source: str = "w
 
 def list_contacts(search: str = "", group_name: str = "") -> list[dict[str, object]]:
     query = """
-        SELECT *
+        SELECT DISTINCT contacts.*
         FROM contacts
         WHERE 1 = 1
     """
@@ -282,9 +348,17 @@ def list_contacts(search: str = "", group_name: str = "") -> list[dict[str, obje
         query += " AND (name LIKE ? OR phone LIKE ? OR email LIKE ?)"
         params.extend([term, term, term])
     if group_name.strip():
-        query += " AND group_name = ?"
-        params.append(group_name.strip())
-    query += " ORDER BY name COLLATE NOCASE"
+        query += """
+            AND EXISTS (
+                SELECT 1
+                FROM contact_folder_members cfm
+                JOIN contact_folders cf ON cf.id = cfm.folder_id
+                WHERE cfm.contact_id = contacts.id
+                  AND cf.name = ?
+            )
+        """
+        params.append(normalize_folder_name(group_name))
+    query += " ORDER BY contacts.name COLLATE NOCASE"
 
     with connect() as conn:
         rows = conn.execute(query, tuple(params)).fetchall()
@@ -297,17 +371,159 @@ def get_contact(contact_id: int) -> dict[str, object] | None:
     return row_to_dict(row)
 
 
-def list_groups() -> list[str]:
+def create_folder(name: str) -> int:
+    name = normalize_folder_name(name)
+    with connect() as conn:
+        return _get_or_create_folder_id(conn, name)
+
+
+def list_folders() -> list[dict[str, object]]:
     with connect() as conn:
         rows = conn.execute(
             """
-            SELECT DISTINCT group_name
-            FROM contacts
-            WHERE group_name <> ''
-            ORDER BY group_name COLLATE NOCASE
+            SELECT
+                cf.id,
+                cf.name,
+                cf.is_default,
+                cf.created_at,
+                cf.updated_at,
+                COUNT(cfm.contact_id) AS total_contacts
+            FROM contact_folders cf
+            LEFT JOIN contact_folder_members cfm ON cfm.folder_id = cf.id
+            GROUP BY cf.id
+            ORDER BY cf.is_default DESC, cf.name COLLATE NOCASE
             """
         ).fetchall()
-    return [str(row["group_name"]) for row in rows]
+    return rows_to_dicts(rows)
+
+
+def list_contacts_by_folder(folder_name: str, search: str = "") -> list[dict[str, object]]:
+    return list_contacts(search=search, group_name=folder_name)
+
+
+def list_used_contacts(folder_name: str = "", search: str = "", limit: int = 1000) -> list[dict[str, object]]:
+    query = """
+        SELECT
+            message_logs.phone,
+            COALESCE(NULLIF(contacts.name, ''), message_logs.recipient_name) AS recipient_name,
+            contacts.id AS contact_id,
+            contacts.group_name,
+            message_logs.status AS status,
+            campaigns.name AS campaign_name,
+            MAX(message_logs.created_at) AS last_sent_at,
+            COUNT(*) AS attempts
+        FROM message_logs
+        LEFT JOIN contacts ON contacts.id = message_logs.contact_id
+        LEFT JOIN campaigns ON campaigns.id = message_logs.campaign_id
+        WHERE message_logs.status IN ('enviado', 'simulado', 'pendente_manual')
+    """
+    params: list[object] = []
+    if folder_name.strip():
+        query += """
+            AND EXISTS (
+                SELECT 1
+                FROM contact_folder_members cfm
+                JOIN contact_folders cf ON cf.id = cfm.folder_id
+                WHERE cfm.contact_id = contacts.id
+                  AND cf.name = ?
+            )
+        """
+        params.append(normalize_folder_name(folder_name))
+    if search.strip():
+        term = f"%{search.strip()}%"
+        query += """
+            AND (
+                contacts.name LIKE ?
+                OR message_logs.recipient_name LIKE ?
+                OR message_logs.phone LIKE ?
+                OR campaigns.name LIKE ?
+            )
+        """
+        params.extend([term, term, term, term])
+    query += """
+        GROUP BY
+            message_logs.phone,
+            recipient_name,
+            contacts.id,
+            contacts.group_name,
+            message_logs.status,
+            campaigns.name
+        ORDER BY last_sent_at DESC
+        LIMIT ?
+    """
+    params.append(limit)
+    with connect() as conn:
+        rows = conn.execute(query, tuple(params)).fetchall()
+    return rows_to_dicts(rows)
+
+
+def list_groups() -> list[str]:
+    return [str(row["name"]) for row in list_folders()]
+
+
+def rename_folder(folder_id: int, new_name: str) -> None:
+    new_name = normalize_folder_name(new_name)
+    with connect() as conn:
+        row = conn.execute("SELECT * FROM contact_folders WHERE id = ?", (folder_id,)).fetchone()
+        if not row:
+            raise ContactError("Pasta não encontrada.")
+        old_name = str(row["name"])
+        try:
+            conn.execute(
+                "UPDATE contact_folders SET name = ?, updated_at = ? WHERE id = ?",
+                (new_name, now_text(), folder_id),
+            )
+        except Exception as exc:
+            if "unique" in str(exc).lower():
+                raise ContactError("Já existe uma pasta com esse nome.") from exc
+            raise
+        conn.execute(
+            "UPDATE contacts SET group_name = ?, updated_at = ? WHERE group_name = ?",
+            (new_name, now_text(), old_name),
+        )
+
+
+def delete_folder(folder_id: int) -> int:
+    with connect() as conn:
+        row = conn.execute("SELECT * FROM contact_folders WHERE id = ?", (folder_id,)).fetchone()
+        if not row:
+            raise ContactError("Pasta não encontrada.")
+        if int(row["is_default"] or 0):
+            raise ContactError("A pasta padrão não pode ser excluída.")
+        old_name = str(row["name"])
+        default_id = _get_or_create_folder_id(conn, DEFAULT_CONTACT_FOLDER)
+        members = conn.execute(
+            "SELECT contact_id FROM contact_folder_members WHERE folder_id = ?",
+            (folder_id,),
+        ).fetchall()
+        for member in members:
+            conn.execute(
+                """
+                INSERT OR IGNORE INTO contact_folder_members (contact_id, folder_id, created_at)
+                VALUES (?, ?, ?)
+                """,
+                (member["contact_id"], default_id, now_text()),
+            )
+        conn.execute("DELETE FROM contact_folders WHERE id = ?", (folder_id,))
+        conn.execute(
+            "UPDATE contacts SET group_name = ?, updated_at = ? WHERE group_name = ?",
+            (DEFAULT_CONTACT_FOLDER, now_text(), old_name),
+        )
+    return len(members)
+
+
+def add_contact_to_folder(contact_id: int, folder_name: str) -> None:
+    if not get_contact(contact_id):
+        raise ContactError("Contato não encontrado.")
+    with connect() as conn:
+        _add_contact_to_folder(conn, contact_id, folder_name)
+
+
+def set_contact_primary_folder(contact_id: int, folder_name: str) -> None:
+    if not get_contact(contact_id):
+        raise ContactError("Contato não encontrado.")
+    with connect() as conn:
+        _set_contact_primary_folder(conn, contact_id, folder_name)
 
 
 def _read_csv(path: Path) -> list[dict[str, str]]:
@@ -402,7 +618,7 @@ def _pick(row: dict[str, str], aliases: set[str]) -> str:
     return ""
 
 
-def import_contacts(path_text: str) -> ImportSummary:
+def import_contacts(path_text: str, folder_name: str = "") -> ImportSummary:
     path = Path(path_text)
     if not path.exists():
         raise ContactError("Arquivo não encontrado. Escolha a planilha novamente.")
@@ -417,11 +633,12 @@ def import_contacts(path_text: str) -> ImportSummary:
 
     summary = ImportSummary()
     seen: set[str] = set()
+    target_folder = normalize_folder_name(folder_name) if folder_name.strip() else ""
     for index, row in enumerate(rows, start=2):
         name = _pick(row, {"nome", "name", "cliente", "contato"}) or "Cliente"
         phone = normalize_phone(_pick(row, {"numero", "número", "telefone", "phone", "celular", "whatsapp"}))
         email = _pick(row, {"email", "e_mail"})
-        group_name = _pick(row, {"grupo", "lista", "group", "group_name"})
+        group_name = target_folder or _pick(row, {"grupo", "lista", "group", "group_name", "pasta", "folder"}) or DEFAULT_CONTACT_FOLDER
         opt_in = parse_opt_in(_pick(row, {"opt_in", "permissao", "permissão", "autorizacao", "autorização"}))
         opt_in_source = _pick(row, {"origem", "fonte", "source", "opt_in_source"}) or "importacao"
         opt_in_category = _pick(row, {"categoria", "category", "opt_in_category"}) or "marketing"

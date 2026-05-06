@@ -51,18 +51,29 @@ def _run_pending_campaigns() -> None:
         if campaigns.has_pending_contacts(int(item["id"]))
     ]
     due = campaigns.get_due_campaigns()
-    to_run: dict[int, dict] = {}
+    to_run: dict[int, tuple[dict, bool]] = {}
 
     for campaign in resumable + due:
-        to_run[int(campaign["id"])] = campaign
+        campaign_id = int(campaign["id"])
+        allow_resume = str(campaign.get("status") or "") == campaigns.CAMPAIGN_STATUS_SENDING
+        to_run[campaign_id] = (campaign, allow_resume)
 
     if not to_run:
         return
 
-    for campaign_id in to_run:
+    for campaign_id, (_campaign, allow_resume) in to_run.items():
         _log(f"Iniciando envio da campanha {campaign_id}.")
         try:
-            totals = campaigns.send_campaign(campaign_id, progress_callback=_progress(campaign_id))
+            can_start, reason = campaigns.can_start_campaign(campaign_id, allow_resume=allow_resume)
+            if not can_start:
+                _log(f"Campanha {campaign_id} ignorada: {reason}")
+                continue
+            totals = campaigns.send_campaign(
+                campaign_id,
+                progress_callback=_progress(campaign_id),
+                runner="background_worker",
+                allow_resume=allow_resume,
+            )
             _log(f"Campanha {campaign_id} concluida: {totals}.")
         except Exception as exc:
             _log(f"Erro na campanha {campaign_id}: {exc}")
