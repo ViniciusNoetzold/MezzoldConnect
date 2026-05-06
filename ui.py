@@ -7,12 +7,12 @@ import tkinter as tk
 import webbrowser
 from datetime import datetime
 from pathlib import Path
-from tkinter import filedialog, messagebox, ttk
+from tkinter import filedialog, messagebox, simpledialog, ttk
 
 import auth
 import campaigns
 import compliance
-import contacts
+import contact_service as contacts
 import network
 import startup
 import warmup
@@ -266,14 +266,23 @@ class MezzoldApp(tk.Tk):
         self._fill_campaign_tree(tree)
 
     def show_contacts(self) -> None:
+        return self._show_contacts_by_folder()
+
         frame = self._screen("Clientes")
         top = ttk.Frame(frame)
         top.pack(fill="x", pady=(0, 10))
         search = tk.StringVar()
+        folder_filter = tk.StringVar()
         ttk.Label(top, text="Buscar").pack(side="left")
         ttk.Entry(top, textvariable=search, width=34).pack(side="left", padx=(8, 8))
+        ttk.Label(top, text="Pasta").pack(side="left")
+        folder_combo = ttk.Combobox(top, textvariable=folder_filter, values=[""] + contacts.list_groups(), width=18, state="readonly")
+        folder_combo.pack(side="left", padx=(8, 8))
         ttk.Button(top, text="Filtrar", command=lambda: refresh()).pack(side="left")
         ttk.Button(top, text="Importar lista", command=self.show_import_contacts).pack(side="left", padx=(8, 0))
+        ttk.Button(top, text="Nova pasta", command=lambda: create_folder()).pack(side="left", padx=(8, 0))
+        ttk.Button(top, text="Renomear pasta", command=lambda: rename_folder()).pack(side="left", padx=(8, 0))
+        ttk.Button(top, text="Excluir pasta", command=lambda: delete_folder()).pack(side="left", padx=(8, 0))
 
         body = ttk.Frame(frame)
         body.pack(fill="both", expand=True)
@@ -340,9 +349,76 @@ class MezzoldApp(tk.Tk):
             opt_in.set(True)
             blacklisted.set(False)
 
+        def refresh_folders() -> None:
+            values = [""] + contacts.list_groups()
+            folder_combo.configure(values=values)
+
+        def create_folder() -> None:
+            folder_name = simpledialog.askstring(APP_TITLE, "Nome da nova pasta:", parent=self)
+            if not folder_name:
+                return
+            try:
+                contacts.create_folder(folder_name)
+            except contacts.ContactError as exc:
+                messagebox.showerror(APP_TITLE, str(exc))
+                return
+            refresh_folders()
+            folder_filter.set(folder_name.strip())
+            group_name.set(folder_name.strip())
+            refresh()
+
+        def rename_folder() -> None:
+            current_name = folder_filter.get().strip()
+            if not current_name:
+                messagebox.showwarning(APP_TITLE, "Escolha uma pasta para renomear.")
+                return
+            folder = next((item for item in contacts.list_folders() if str(item["name"]) == current_name), None)
+            if not folder:
+                messagebox.showerror(APP_TITLE, "Pasta não encontrada.")
+                return
+            new_name = simpledialog.askstring(APP_TITLE, "Novo nome da pasta:", initialvalue=current_name, parent=self)
+            if not new_name:
+                return
+            try:
+                contacts.rename_folder(int(folder["id"]), new_name)
+            except contacts.ContactError as exc:
+                messagebox.showerror(APP_TITLE, str(exc))
+                return
+            refresh_folders()
+            folder_filter.set(new_name.strip())
+            if group_name.get().strip() == current_name:
+                group_name.set(new_name.strip())
+            refresh()
+
+        def delete_folder() -> None:
+            current_name = folder_filter.get().strip()
+            if not current_name:
+                messagebox.showwarning(APP_TITLE, "Escolha uma pasta para excluir.")
+                return
+            folder = next((item for item in contacts.list_folders() if str(item["name"]) == current_name), None)
+            if not folder:
+                messagebox.showerror(APP_TITLE, "Pasta não encontrada.")
+                return
+            if int(folder.get("is_default") or 0):
+                messagebox.showerror(APP_TITLE, "A pasta padrão não pode ser excluída.")
+                return
+            if not messagebox.askyesno(APP_TITLE, f"Excluir a pasta '{current_name}'? Os contatos serão movidos para Importados."):
+                return
+            try:
+                moved = contacts.delete_folder(int(folder["id"]))
+            except contacts.ContactError as exc:
+                messagebox.showerror(APP_TITLE, str(exc))
+                return
+            refresh_folders()
+            folder_filter.set("Importados")
+            if group_name.get().strip() == current_name:
+                group_name.set("Importados")
+            refresh()
+            self._set_status(f"Pasta excluída. {moved} contato(s) movido(s) para Importados.")
+
         def refresh() -> None:
             tree.delete(*tree.get_children())
-            for item in contacts.list_contacts(search.get()):
+            for item in contacts.list_contacts(search.get(), folder_filter.get()):
                 tree.insert(
                     "",
                     "end",
@@ -442,7 +518,432 @@ class MezzoldApp(tk.Tk):
             clear_form()
         refresh()
 
-    def show_import_contacts(self) -> None:
+    def _show_contacts_by_folder(self) -> None:
+        frame = self._screen("Clientes")
+        search = tk.StringVar()
+        selected_folder = tk.StringVar()
+        selected_title = tk.StringVar(value="Selecione uma pasta")
+        count_text = tk.StringVar(value="")
+        empty_text = tk.StringVar(value="")
+        folder_records: list[dict[str, object]] = []
+        folder_by_iid: dict[str, dict[str, object]] = {}
+
+        toolbar = ttk.Frame(frame)
+        toolbar.pack(fill="x", pady=(0, 10))
+        ttk.Label(toolbar, text="Buscar").pack(side="left")
+        search_entry = ttk.Entry(toolbar, textvariable=search, width=34)
+        search_entry.pack(side="left", padx=(8, 8))
+        refresh_button = ttk.Button(toolbar, text="Atualizar")
+        refresh_button.pack(side="left")
+        new_folder_button = ttk.Button(toolbar, text="Nova pasta")
+        new_folder_button.pack(side="left", padx=(8, 0))
+        rename_folder_button = ttk.Button(toolbar, text="Renomear pasta")
+        rename_folder_button.pack(side="left", padx=(8, 0))
+        delete_folder_button = ttk.Button(toolbar, text="Excluir pasta")
+        delete_folder_button.pack(side="left", padx=(8, 0))
+
+        body = ttk.Frame(frame)
+        body.pack(fill="both", expand=True)
+
+        folders_panel = ttk.Frame(body, style="Panel.TFrame", padding=12)
+        folders_panel.pack(side="left", fill="y", padx=(0, 12))
+        ttk.Label(folders_panel, text="Pastas", style="Panel.TLabel").pack(anchor="w", pady=(0, 8))
+        folder_tree = ttk.Treeview(folders_panel, columns=("name", "total"), show="headings", selectmode="browse", height=18)
+        folder_tree.heading("name", text="Nome")
+        folder_tree.heading("total", text="Total")
+        folder_tree.column("name", width=170, anchor="w")
+        folder_tree.column("total", width=55, anchor="center", stretch=False)
+        folder_tree.pack(fill="y", expand=True)
+        ttk.Label(folders_panel, textvariable=empty_text, style="Muted.TLabel", wraplength=220).pack(anchor="w", pady=(10, 0))
+        first_folder_button = ttk.Button(folders_panel, text="Criar primeira pasta")
+        first_folder_button.pack(fill="x", pady=(10, 0))
+
+        content = ttk.Frame(body)
+        content.pack(side="left", fill="both", expand=True)
+        content_header = ttk.Frame(content)
+        content_header.pack(fill="x", pady=(0, 10))
+        ttk.Label(content_header, textvariable=selected_title, font=("Segoe UI Semibold", 13)).pack(side="left")
+        ttk.Label(content_header, textvariable=count_text, style="Muted.TLabel").pack(side="left", padx=(12, 0))
+        content_actions = ttk.Frame(content)
+        content_actions.pack(fill="x", pady=(0, 10))
+        add_contact_button = ttk.Button(content_actions, text="Adicionar contato")
+        add_contact_button.pack(side="left")
+        edit_contact_button = ttk.Button(content_actions, text="Editar contato")
+        edit_contact_button.pack(side="left", padx=(8, 0))
+        import_folder_button = ttk.Button(content_actions, text="Importar para esta pasta")
+        import_folder_button.pack(side="left", padx=(8, 0))
+
+        notebook = ttk.Notebook(content)
+        notebook.pack(fill="both", expand=True)
+        contacts_tab = ttk.Frame(notebook)
+        used_tab = ttk.Frame(notebook)
+        optin_tab = ttk.Frame(notebook)
+        blacklist_tab = ttk.Frame(notebook)
+        notebook.add(contacts_tab, text="Contatos da pasta")
+        notebook.add(used_tab, text="Ja enviados/usados")
+        notebook.add(optin_tab, text="Com opt-in")
+        notebook.add(blacklist_tab, text="Blacklist")
+
+        def make_tree(parent: ttk.Frame, columns: tuple[str, ...], headings: dict[str, str], widths: dict[str, int]) -> ttk.Treeview:
+            tree = ttk.Treeview(parent, columns=columns, show="headings", selectmode="browse")
+            for column in columns:
+                tree.heading(column, text=headings[column])
+                tree.column(column, width=widths[column], anchor="w")
+            tree.pack(side="left", fill="both", expand=True)
+            scrollbar = ttk.Scrollbar(parent, orient="vertical", command=tree.yview)
+            scrollbar.pack(side="right", fill="y")
+            tree.configure(yscrollcommand=scrollbar.set)
+            return tree
+
+        contact_columns = ("id", "name", "phone", "group", "opt_in", "source", "blacklisted")
+        contact_headings = {
+            "id": "ID",
+            "name": "Cliente",
+            "phone": "Telefone",
+            "group": "Pasta",
+            "opt_in": "Opt-in",
+            "source": "Origem",
+            "blacklisted": "Blacklist",
+        }
+        contact_widths = {"id": 55, "name": 220, "phone": 140, "group": 140, "opt_in": 70, "source": 130, "blacklisted": 90}
+        contacts_tree = make_tree(contacts_tab, contact_columns, contact_headings, contact_widths)
+        optin_tree = make_tree(optin_tab, contact_columns, contact_headings, contact_widths)
+        blacklist_tree = make_tree(blacklist_tab, contact_columns, contact_headings, contact_widths)
+
+        used_columns = ("phone", "name", "campaign", "status", "attempts", "last_sent")
+        used_headings = {
+            "phone": "Telefone",
+            "name": "Cliente",
+            "campaign": "Campanha",
+            "status": "Status",
+            "attempts": "Tentativas",
+            "last_sent": "Ultimo uso",
+        }
+        used_widths = {"phone": 140, "name": 220, "campaign": 210, "status": 130, "attempts": 80, "last_sent": 150}
+        used_tree = make_tree(used_tab, used_columns, used_headings, used_widths)
+
+        editable_trees = {
+            str(contacts_tab): contacts_tree,
+            str(optin_tab): optin_tree,
+            str(blacklist_tab): blacklist_tree,
+        }
+
+        def current_folder_name() -> str:
+            return selected_folder.get().strip()
+
+        def folder_total(folder_name: str) -> int:
+            for item in folder_records:
+                if str(item.get("name") or "") == folder_name:
+                    return int(item.get("total_contacts") or 0)
+            return 0
+
+        def fill_contact_tree(tree: ttk.Treeview, items: list[dict[str, object]]) -> None:
+            tree.delete(*tree.get_children())
+            for item in items:
+                tree.insert(
+                    "",
+                    "end",
+                    values=(
+                        item.get("id") or "",
+                        item.get("name") or "",
+                        item.get("phone") or "",
+                        item.get("group_name") or "",
+                        "Sim" if item.get("opt_in") else "Nao",
+                        item.get("opt_in_source") or "",
+                        "Sim" if item.get("blacklisted") else "Nao",
+                    ),
+                )
+
+        def fill_used_tree(items: list[dict[str, object]]) -> None:
+            used_tree.delete(*used_tree.get_children())
+            for item in items:
+                status = STATUS_LABELS.get(str(item.get("status") or ""), str(item.get("status") or ""))
+                used_tree.insert(
+                    "",
+                    "end",
+                    values=(
+                        item.get("phone") or "",
+                        item.get("recipient_name") or "",
+                        item.get("campaign_name") or "",
+                        status,
+                        item.get("attempts") or 0,
+                        item.get("last_sent_at") or "",
+                    ),
+                )
+
+        def refresh_contacts() -> None:
+            folder_name = current_folder_name()
+            contacts_tree.delete(*contacts_tree.get_children())
+            optin_tree.delete(*optin_tree.get_children())
+            blacklist_tree.delete(*blacklist_tree.get_children())
+            used_tree.delete(*used_tree.get_children())
+            if not folder_name:
+                selected_title.set("Selecione uma pasta")
+                count_text.set("Nenhuma pasta selecionada.")
+                return
+
+            items = contacts.list_contacts(search.get(), folder_name)
+            optin_items = [item for item in items if item.get("opt_in") and not item.get("blacklisted")]
+            blacklist_items = [item for item in items if item.get("blacklisted")]
+            used_items = contacts.list_used_contacts(folder_name=folder_name, search=search.get())
+            fill_contact_tree(contacts_tree, items)
+            fill_contact_tree(optin_tree, optin_items)
+            fill_contact_tree(blacklist_tree, blacklist_items)
+            fill_used_tree(used_items)
+            selected_title.set(folder_name)
+            count_text.set(
+                f"Total: {folder_total(folder_name)} | Filtrados: {len(items)} | "
+                f"Opt-in: {len(optin_items)} | Blacklist: {len(blacklist_items)} | Usados: {len(used_items)}"
+            )
+            self._set_status(f"Pasta '{folder_name}' atualizada.")
+
+        def refresh_folders(select_name: str = "") -> None:
+            folder_tree.delete(*folder_tree.get_children())
+            folder_by_iid.clear()
+            folder_records[:] = contacts.list_folders()
+            for item in folder_records:
+                iid = f"folder:{item.get('id')}"
+                folder_by_iid[iid] = item
+                folder_tree.insert(
+                    "",
+                    "end",
+                    iid=iid,
+                    values=(item.get("name") or "", item.get("total_contacts") or 0),
+                )
+
+            if not folder_records:
+                selected_folder.set("")
+                empty_text.set("Nenhuma pasta criada ainda. Crie a primeira pasta para organizar seus contatos.")
+                if not first_folder_button.winfo_ismapped():
+                    first_folder_button.pack(fill="x", pady=(10, 0))
+                refresh_contacts()
+                return
+
+            empty_text.set("")
+            if first_folder_button.winfo_ismapped():
+                first_folder_button.pack_forget()
+            target_name = select_name.strip() or current_folder_name() or str(folder_records[0].get("name") or "")
+            target_iid = ""
+            for iid, item in folder_by_iid.items():
+                if str(item.get("name") or "") == target_name:
+                    target_iid = iid
+                    break
+            if not target_iid:
+                target_iid = next(iter(folder_by_iid))
+            folder_tree.selection_set(target_iid)
+            folder_tree.focus(target_iid)
+            selected_folder.set(str(folder_by_iid[target_iid].get("name") or ""))
+            refresh_contacts()
+
+        def on_folder_select(_event: object) -> None:
+            selection = folder_tree.selection()
+            if not selection:
+                return
+            item = folder_by_iid.get(selection[0])
+            if not item:
+                return
+            selected_folder.set(str(item.get("name") or ""))
+            refresh_contacts()
+
+        def create_folder() -> None:
+            folder_name = simpledialog.askstring(APP_TITLE, "Nome da nova pasta:", parent=self)
+            if not folder_name:
+                return
+            try:
+                contacts.create_folder(folder_name)
+            except contacts.ContactError as exc:
+                messagebox.showerror(APP_TITLE, str(exc))
+                return
+            refresh_folders(folder_name.strip())
+
+        def selected_folder_record() -> dict[str, object] | None:
+            folder_name = current_folder_name()
+            for item in folder_records:
+                if str(item.get("name") or "") == folder_name:
+                    return item
+            return None
+
+        def rename_folder() -> None:
+            item = selected_folder_record()
+            if not item:
+                messagebox.showwarning(APP_TITLE, "Escolha uma pasta para renomear.")
+                return
+            current_name = str(item.get("name") or "")
+            new_name = simpledialog.askstring(APP_TITLE, "Novo nome da pasta:", initialvalue=current_name, parent=self)
+            if not new_name:
+                return
+            try:
+                contacts.rename_folder(int(item["id"]), new_name)
+            except contacts.ContactError as exc:
+                messagebox.showerror(APP_TITLE, str(exc))
+                return
+            refresh_folders(new_name.strip())
+
+        def delete_folder() -> None:
+            item = selected_folder_record()
+            if not item:
+                messagebox.showwarning(APP_TITLE, "Escolha uma pasta para excluir.")
+                return
+            current_name = str(item.get("name") or "")
+            if int(item.get("is_default") or 0):
+                messagebox.showerror(APP_TITLE, "A pasta padrao nao pode ser excluida.")
+                return
+            if not messagebox.askyesno(APP_TITLE, f"Excluir a pasta '{current_name}'? Os contatos serao movidos para Importados."):
+                return
+            try:
+                moved = contacts.delete_folder(int(item["id"]))
+            except contacts.ContactError as exc:
+                messagebox.showerror(APP_TITLE, str(exc))
+                return
+            refresh_folders("Importados")
+            self._set_status(f"Pasta excluida. {moved} contato(s) movido(s) para Importados.")
+
+        def selected_contact_id() -> int:
+            current_tab = notebook.select()
+            tree = editable_trees.get(str(current_tab))
+            if not tree or not tree.selection():
+                return 0
+            values = tree.item(tree.selection()[0], "values")
+            try:
+                return int(values[0])
+            except (TypeError, ValueError, IndexError):
+                return 0
+
+        def open_contact_dialog(contact_id: int = 0) -> None:
+            folder_name = current_folder_name()
+            if not folder_name:
+                messagebox.showwarning(APP_TITLE, "Crie ou selecione uma pasta antes de adicionar contatos.")
+                return
+
+            data = contacts.get_contact(contact_id) if contact_id else None
+            dialog = tk.Toplevel(self)
+            dialog.title("Contato")
+            dialog.transient(self)
+            dialog.grab_set()
+            dialog.resizable(False, False)
+            panel = ttk.Frame(dialog, padding=18)
+            panel.pack(fill="both", expand=True)
+
+            name = tk.StringVar(value=str(data.get("name") or "") if data else "")
+            phone = tk.StringVar(value=str(data.get("phone") or "") if data else "")
+            email = tk.StringVar(value=str(data.get("email") or "") if data else "")
+            group_name = tk.StringVar(value=str(data.get("group_name") or folder_name) if data else folder_name)
+            notes = tk.StringVar(value=str(data.get("notes") or "") if data else "")
+            opt_in_source = tk.StringVar(value=str(data.get("opt_in_source") or "manual") if data else "manual")
+            opt_in_category = tk.StringVar(value=str(data.get("opt_in_category") or "marketing") if data else "marketing")
+            opt_in_at = tk.StringVar(value=str(data.get("opt_in_at") or "") if data else "")
+            consent_notes = tk.StringVar(value=str(data.get("consent_notes") or "") if data else "")
+            opt_in = tk.BooleanVar(value=bool(data.get("opt_in")) if data else True)
+            blacklisted = tk.BooleanVar(value=bool(data.get("blacklisted")) if data else False)
+
+            fields = [
+                ("Nome do cliente", name),
+                ("Telefone com DDD", phone),
+                ("E-mail", email),
+                ("Origem do opt-in", opt_in_source),
+                ("Categoria do opt-in", opt_in_category),
+                ("Data do opt-in", opt_in_at),
+                ("Comprovante/observacao", consent_notes),
+                ("Observacoes internas", notes),
+            ]
+            for label, variable in fields:
+                self._entry(panel, label, variable).pack(fill="x", pady=(0, 10))
+
+            folder_row = ttk.Frame(panel)
+            folder_row.pack(fill="x", pady=(0, 10))
+            ttk.Label(folder_row, text="Pasta").pack(anchor="w", pady=(0, 4))
+            ttk.Combobox(folder_row, textvariable=group_name, values=contacts.list_groups(), state="readonly").pack(fill="x")
+            ttk.Checkbutton(panel, text="Contato tem opt-in", variable=opt_in).pack(anchor="w", pady=(0, 8))
+            ttk.Checkbutton(panel, text="Contato esta em blacklist", variable=blacklisted).pack(anchor="w", pady=(0, 12))
+
+            buttons = ttk.Frame(panel)
+            buttons.pack(fill="x")
+
+            def save_contact() -> None:
+                try:
+                    if contact_id:
+                        contacts.update_contact(
+                            contact_id,
+                            name=name.get(),
+                            phone=phone.get(),
+                            email=email.get(),
+                            group_name=group_name.get(),
+                            opt_in=opt_in.get(),
+                            opt_in_source=opt_in_source.get(),
+                            opt_in_category=opt_in_category.get(),
+                            opt_in_at=opt_in_at.get(),
+                            consent_notes=consent_notes.get(),
+                            notes=notes.get(),
+                            blacklisted=blacklisted.get(),
+                        )
+                    else:
+                        contacts.create_contact(
+                            name.get(),
+                            phone.get(),
+                            email.get(),
+                            group_name.get(),
+                            opt_in=int(opt_in.get()),
+                            opt_in_source=opt_in_source.get(),
+                            opt_in_category=opt_in_category.get(),
+                            opt_in_at=opt_in_at.get(),
+                            consent_notes=consent_notes.get(),
+                            notes=notes.get(),
+                            blacklisted=blacklisted.get(),
+                        )
+                except contacts.ContactError as exc:
+                    messagebox.showerror(APP_TITLE, str(exc))
+                    return
+                dialog.destroy()
+                refresh_folders(group_name.get())
+                self._set_status("Contato salvo.")
+
+            def delete_contact() -> None:
+                if not contact_id:
+                    return
+                if not messagebox.askyesno(APP_TITLE, "Excluir este contato?"):
+                    return
+                contacts.delete_contact(contact_id)
+                dialog.destroy()
+                refresh_folders(group_name.get())
+                self._set_status("Contato excluido.")
+
+            ttk.Button(buttons, text="Salvar", style="Accent.TButton", command=save_contact).pack(side="left")
+            if contact_id:
+                ttk.Button(buttons, text="Excluir", command=delete_contact).pack(side="left", padx=(8, 0))
+            ttk.Button(buttons, text="Cancelar", command=dialog.destroy).pack(side="right")
+
+        def edit_selected_contact() -> None:
+            contact_id = selected_contact_id()
+            if not contact_id:
+                messagebox.showwarning(APP_TITLE, "Selecione um contato nas abas de contatos, opt-in ou blacklist.")
+                return
+            open_contact_dialog(contact_id)
+
+        def import_to_current_folder() -> None:
+            folder_name = current_folder_name()
+            if not folder_name:
+                messagebox.showwarning(APP_TITLE, "Selecione uma pasta antes de importar.")
+                return
+            self.show_import_contacts(folder_name)
+
+        folder_tree.bind("<<TreeviewSelect>>", on_folder_select)
+        search_entry.bind("<Return>", lambda _event: refresh_contacts())
+        notebook.bind("<<NotebookTabChanged>>", lambda _event: refresh_contacts())
+        for tree in (contacts_tree, optin_tree, blacklist_tree):
+            tree.bind("<Double-1>", lambda _event: edit_selected_contact())
+
+        refresh_button.configure(command=refresh_contacts)
+        new_folder_button.configure(command=create_folder)
+        first_folder_button.configure(command=create_folder)
+        rename_folder_button.configure(command=rename_folder)
+        delete_folder_button.configure(command=delete_folder)
+        add_contact_button.configure(command=lambda: open_contact_dialog())
+        edit_contact_button.configure(command=edit_selected_contact)
+        import_folder_button.configure(command=import_to_current_folder)
+
+        refresh_folders()
+
+    def show_import_contacts(self, folder_name: str = "") -> None:
         frame = self._screen("Importar clientes")
         panel = ttk.Frame(frame, style="Panel.TFrame", padding=18)
         panel.pack(fill="x")
@@ -460,11 +961,32 @@ class MezzoldApp(tk.Tk):
             command=lambda: path.set(filedialog.askopenfilename(filetypes=[("Planilhas", "*.csv *.txt *.xlsx"), ("Todos", "*.*")])),
         ).pack(side="left", padx=(8, 0))
 
+        folder = tk.StringVar(value=folder_name)
+        folder_row = ttk.Frame(panel, style="Panel.TFrame")
+        folder_row.pack(fill="x", pady=(0, 12))
+        ttk.Label(folder_row, text="Importar para pasta", style="Panel.TLabel").pack(side="left")
+        folder_combo = ttk.Combobox(folder_row, textvariable=folder, values=[""] + contacts.list_groups(), state="readonly")
+        folder_combo.pack(side="left", fill="x", expand=True, padx=(8, 8))
+
+        def create_import_folder() -> None:
+            folder_name = simpledialog.askstring(APP_TITLE, "Nome da nova pasta:", parent=self)
+            if not folder_name:
+                return
+            try:
+                contacts.create_folder(folder_name)
+            except contacts.ContactError as exc:
+                messagebox.showerror(APP_TITLE, str(exc))
+                return
+            folder_combo.configure(values=[""] + contacts.list_groups())
+            folder.set(folder_name.strip())
+
+        ttk.Button(folder_row, text="Nova pasta", command=create_import_folder).pack(side="left")
+
         ttk.Label(panel, textvariable=result, style="Panel.TLabel", wraplength=760).pack(anchor="w", pady=(0, 12))
 
         def do_import() -> None:
             try:
-                summary = contacts.import_contacts(path.get())
+                summary = contacts.import_contacts(path.get(), folder_name=folder.get())
             except contacts.ContactError as exc:
                 messagebox.showerror(APP_TITLE, str(exc))
                 return
@@ -626,7 +1148,7 @@ class MezzoldApp(tk.Tk):
         def send_now() -> None:
             campaign_id = selected_campaign_id()
             if campaign_id:
-                self._start_campaign_thread(campaign_id, progress)
+                self._start_campaign_thread(campaign_id, progress, source="ui_manual")
 
         def pause() -> None:
             campaign_id = selected_campaign_id()
@@ -635,7 +1157,11 @@ class MezzoldApp(tk.Tk):
             event = self.running_events.get(campaign_id)
             if event:
                 event.set()
-            campaigns.pause_campaign(campaign_id)
+            try:
+                campaigns.pause_campaign(campaign_id)
+            except campaigns.CampaignError as exc:
+                messagebox.showerror(APP_TITLE, str(exc))
+                return
             refresh()
 
         def cancel() -> None:
@@ -823,7 +1349,7 @@ class MezzoldApp(tk.Tk):
             tree.heading(column, text=heading)
             tree.column(column, width=width, anchor="w")
         tree.pack(fill="both", expand=True)
-        for item in campaigns.list_sent_numbers():
+        for item in contacts.list_used_phones():
             tree.insert(
                 "",
                 "end",
@@ -1514,9 +2040,18 @@ class MezzoldApp(tk.Tk):
         progress_var: tk.StringVar | None = None,
         interactive: bool = True,
         internet_alert: bool = True,
+        source: str = "ui",
+        allow_resume: bool = False,
     ) -> None:
         if campaign_id in self.running_events:
             messagebox.showinfo(APP_TITLE, "Esta campanha já está sendo enviada.")
+            return
+        can_start, reason = campaigns.can_start_campaign(campaign_id, allow_resume=allow_resume)
+        if not can_start:
+            if interactive:
+                messagebox.showinfo(APP_TITLE, reason)
+            else:
+                self._set_status(reason)
             return
         if not network.has_internet():
             if internet_alert:
@@ -1546,7 +2081,13 @@ class MezzoldApp(tk.Tk):
 
         def worker() -> None:
             try:
-                totals = campaigns.send_campaign(campaign_id, progress_callback=progress, stop_event=event)
+                totals = campaigns.send_campaign(
+                    campaign_id,
+                    progress_callback=progress,
+                    stop_event=event,
+                    runner=source,
+                    allow_resume=allow_resume,
+                )
                 done = (
                     f"Campanha #{campaign_id}: enviados {totals['enviado']}, "
                     f"simulados {totals['simulado']}, manuais {totals['pendente_manual']}, "
@@ -1554,7 +2095,10 @@ class MezzoldApp(tk.Tk):
                 )
                 self.after(0, lambda: self._set_status(done))
             except campaigns.CampaignError as exc:
-                self.after(0, lambda: messagebox.showerror(APP_TITLE, str(exc)))
+                if interactive:
+                    self.after(0, lambda: messagebox.showerror(APP_TITLE, str(exc)))
+                else:
+                    self.after(0, lambda: self._set_status(str(exc)))
             finally:
                 self.running_events.pop(campaign_id, None)
                 self.after(0, self._refresh_current_screen)
@@ -1616,7 +2160,12 @@ class MezzoldApp(tk.Tk):
                 self._set_status("Não há campanha para enviar agora.")
             return
         for campaign in due:
-            self._start_campaign_thread(int(campaign["id"]), interactive=False, internet_alert=not quiet)
+            self._start_campaign_thread(
+                int(campaign["id"]),
+                interactive=False,
+                internet_alert=not quiet,
+                source="ui_scheduler" if quiet else "ui_due_button",
+            )
 
     def _resume_interrupted_campaigns(self) -> None:
         resumable = [item for item in campaigns.get_resumable_campaigns() if campaigns.has_pending_contacts(int(item["id"]))]
@@ -1626,7 +2175,13 @@ class MezzoldApp(tk.Tk):
             self._set_status("Há campanhas pausadas aguardando internet.")
             return
         for campaign in resumable:
-            self._start_campaign_thread(int(campaign["id"]), interactive=False, internet_alert=False)
+            self._start_campaign_thread(
+                int(campaign["id"]),
+                interactive=False,
+                internet_alert=False,
+                source="ui_resume",
+                allow_resume=True,
+            )
         self._set_status(f"Retomando {len(resumable)} campanha(s) que estavam paradas.")
 
     def _scheduler_tick(self) -> None:

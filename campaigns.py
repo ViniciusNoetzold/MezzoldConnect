@@ -1,13 +1,16 @@
 from __future__ import annotations
 
 import random
+import os
+import sqlite3
 import time
+import uuid
 from datetime import datetime, timedelta
 from threading import Event
 from typing import Any, Callable
 
 import compliance
-from database import connect, now_text, row_to_dict, rows_to_dicts
+from database import DATA_DIR, connect, now_text, row_to_dict, rows_to_dicts
 from database import get_setting
 from whatsapp import WhatsAppAPIError, WhatsAppBusinessClient, load_config
 
@@ -17,6 +20,39 @@ class CampaignError(ValueError):
 
 
 ProgressCallback = Callable[[int, int, str], None]
+
+SEND_LOG_PATH = DATA_DIR / "send_flow.log"
+LOCK_STALE_MINUTES = 120
+CAMPAIGN_STATUS_DRAFT = "rascunho"
+CAMPAIGN_STATUS_SCHEDULED = "agendada"
+CAMPAIGN_STATUS_SENDING = "enviando"
+CAMPAIGN_STATUS_PAUSED = "pausada"
+CAMPAIGN_STATUS_CANCELLED = "cancelada"
+CAMPAIGN_STATUS_DONE = "concluída"
+CAMPAIGN_STATUS_DONE_LEGACY = "concluida"
+CAMPAIGN_STATUS_MANUAL_PENDING = "aguardando_manual"
+CAMPAIGN_STATUS_ERROR = "erro"
+CAMPAIGN_STATUS_FAILED = "falhou"
+CAMPAIGN_STARTABLE_STATUSES = {CAMPAIGN_STATUS_DRAFT, CAMPAIGN_STATUS_SCHEDULED, CAMPAIGN_STATUS_PAUSED}
+CAMPAIGN_TERMINAL_STATUSES = {
+    CAMPAIGN_STATUS_CANCELLED,
+    CAMPAIGN_STATUS_DONE,
+    CAMPAIGN_STATUS_DONE_LEGACY,
+    CAMPAIGN_STATUS_ERROR,
+    CAMPAIGN_STATUS_FAILED,
+    CAMPAIGN_STATUS_MANUAL_PENDING,
+}
+CONTACT_STATUS_WAITING = "aguardando"
+CONTACT_STATUS_SENT = "enviado"
+CONTACT_STATUS_BLOCKED = "bloqueado"
+CONTACT_STATUS_NO_PERMISSION = "sem_autorizacao"
+CONTACT_STATUS_MANUAL_PENDING = "aguardando_manual"
+CONTACT_FINAL_STATUSES = {
+    CONTACT_STATUS_SENT,
+    CONTACT_STATUS_BLOCKED,
+    CONTACT_STATUS_NO_PERMISSION,
+    CONTACT_STATUS_MANUAL_PENDING,
+}
 
 
 def create_campaign(
@@ -42,7 +78,7 @@ def create_campaign(
         raise CampaignError("Escolha pelo menos um cliente autorizado.")
 
     timestamp = now_text()
-    status = "agendada" if scheduled_at else "rascunho"
+    status = CAMPAIGN_STATUS_SCHEDULED if scheduled_at else CAMPAIGN_STATUS_DRAFT
     variants = _normalize_variants(message, message_variants or [])
     media_options = [item.strip() for item in (media_variants or []) if item.strip()]
     with connect() as conn:
@@ -70,9 +106,9 @@ def create_campaign(
         conn.executemany(
             """
             INSERT INTO campaign_contacts (campaign_id, contact_id, status, updated_at)
-            VALUES (?, ?, 'aguardando', ?)
+            VALUES (?, ?, ?, ?)
             """,
-            [(campaign_id, contact_id, timestamp) for contact_id in contact_ids],
+            [(campaign_id, contact_id, CONTACT_STATUS_WAITING, timestamp) for contact_id in contact_ids],
         )
         conn.executemany(
             """
@@ -151,9 +187,15 @@ def has_pending_contacts(campaign_id: int) -> bool:
             SELECT COUNT(*) AS total
             FROM campaign_contacts
             WHERE campaign_id = ?
-              AND status NOT IN ('enviado', 'bloqueado', 'sem_autorizacao', 'aguardando_manual')
+              AND status NOT IN (?, ?, ?, ?)
             """,
-            (campaign_id,),
+            (
+                campaign_id,
+                CONTACT_STATUS_SENT,
+                CONTACT_STATUS_BLOCKED,
+                CONTACT_STATUS_NO_PERMISSION,
+                CONTACT_STATUS_MANUAL_PENDING,
+            ),
         ).fetchone()
     return int(row["total"]) > 0
 
@@ -185,27 +227,45 @@ def get_campaign_contacts(campaign_id: int) -> list[dict[str, Any]]:
 def schedule_campaign(campaign_id: int, scheduled_at: str) -> None:
     if not scheduled_at.strip():
         raise CampaignError("Informe a data e o horário do envio.")
+    campaign = get_campaign(campaign_id)
+    if not campaign:
+        raise CampaignError("Não encontrei essa campanha.")
+    status = str(campaign.get("status") or "")
+    if status in CAMPAIGN_TERMINAL_STATUSES or status == CAMPAIGN_STATUS_SENDING:
+        raise CampaignError(f"Campanha com status '{status}' não pode ser agendada novamente.")
     with connect() as conn:
         conn.execute(
             """
             UPDATE campaigns
-            SET status = 'agendada', scheduled_at = ?, updated_at = ?
+            SET status = ?, scheduled_at = ?, updated_at = ?
             WHERE id = ?
             """,
-            (scheduled_at.strip(), now_text(), campaign_id),
+            (CAMPAIGN_STATUS_SCHEDULED, scheduled_at.strip(), now_text(), campaign_id),
         )
 
 
 def pause_campaign(campaign_id: int) -> None:
-    _set_campaign_status(campaign_id, "pausada")
+    campaign = get_campaign(campaign_id)
+    if not campaign:
+        raise CampaignError("Não encontrei essa campanha.")
+    status = str(campaign.get("status") or "")
+    if status in CAMPAIGN_TERMINAL_STATUSES:
+        raise CampaignError(f"Campanha com status '{status}' não pode ser pausada.")
+    _set_campaign_status(campaign_id, CAMPAIGN_STATUS_PAUSED)
 
 
 def cancel_campaign(campaign_id: int) -> None:
-    _set_campaign_status(campaign_id, "cancelada")
+    _set_campaign_status(campaign_id, CAMPAIGN_STATUS_CANCELLED)
 
 
 def mark_draft(campaign_id: int) -> None:
-    _set_campaign_status(campaign_id, "rascunho")
+    campaign = get_campaign(campaign_id)
+    if not campaign:
+        raise CampaignError("Não encontrei essa campanha.")
+    status = str(campaign.get("status") or "")
+    if status in CAMPAIGN_TERMINAL_STATUSES or status == CAMPAIGN_STATUS_SENDING:
+        raise CampaignError(f"Campanha com status '{status}' não pode voltar para rascunho.")
+    _set_campaign_status(campaign_id, CAMPAIGN_STATUS_DRAFT)
 
 
 def _set_campaign_status(campaign_id: int, status: str) -> None:
@@ -223,12 +283,12 @@ def get_due_campaigns() -> list[dict[str, Any]]:
             """
             SELECT *
             FROM campaigns
-            WHERE status = 'agendada'
+            WHERE status = ?
               AND scheduled_at IS NOT NULL
               AND scheduled_at <= ?
             ORDER BY scheduled_at
             """,
-            (current,),
+            (CAMPAIGN_STATUS_SCHEDULED, current),
         ).fetchall()
     return rows_to_dicts(rows)
 
@@ -239,9 +299,10 @@ def get_resumable_campaigns() -> list[dict[str, Any]]:
             """
             SELECT *
             FROM campaigns
-            WHERE status = 'enviando'
+            WHERE status = ?
             ORDER BY updated_at
-            """
+            """,
+            (CAMPAIGN_STATUS_SENDING,),
         ).fetchall()
     return rows_to_dicts(rows)
 
@@ -406,17 +467,189 @@ def _sleep_between_sends(counter: int, total: int, config_interval: float) -> No
         time.sleep(random.uniform(pause_min, pause_max))
 
 
+def _send_log(message: str) -> None:
+    try:
+        DATA_DIR.mkdir(parents=True, exist_ok=True)
+        timestamp = datetime.now().isoformat(timespec="seconds")
+        with SEND_LOG_PATH.open("a", encoding="utf-8") as file:
+            file.write(f"[{timestamp}] {message}\n")
+    except OSError:
+        pass
+
+
+def _preview(value: object, limit: int = 600) -> str:
+    text = " ".join(str(value or "").split())
+    if len(text) <= limit:
+        return text
+    return text[: limit - 3] + "..."
+
+
+def _pending_contact_count(conn, campaign_id: int) -> int:
+    row = conn.execute(
+        """
+        SELECT COUNT(*) AS total
+        FROM campaign_contacts
+        WHERE campaign_id = ?
+          AND status NOT IN (?, ?, ?, ?)
+        """,
+        (
+            campaign_id,
+            CONTACT_STATUS_SENT,
+            CONTACT_STATUS_BLOCKED,
+            CONTACT_STATUS_NO_PERMISSION,
+            CONTACT_STATUS_MANUAL_PENDING,
+        ),
+    ).fetchone()
+    return int(row["total"] or 0)
+
+
+def _start_block_reason(campaign: dict[str, Any], pending_contacts: int, allow_resume: bool) -> str:
+    status = str(campaign.get("status") or "").strip()
+    if status in CAMPAIGN_TERMINAL_STATUSES:
+        return f"Campanha com status '{status}' não pode ser reiniciada."
+    if status == CAMPAIGN_STATUS_SENDING:
+        if allow_resume and pending_contacts > 0:
+            return ""
+        return "Campanha já está em andamento."
+    if status not in CAMPAIGN_STARTABLE_STATUSES:
+        return f"Campanha com status '{status}' não está liberada para início."
+    if pending_contacts <= 0:
+        return "Campanha não tem contatos pendentes para envio."
+    return ""
+
+
+def can_start_campaign(campaign_id: int, allow_resume: bool = False) -> tuple[bool, str]:
+    with connect() as conn:
+        conn.execute(
+            "DELETE FROM campaign_send_locks WHERE locked_at <= ?",
+            ((datetime.now() - timedelta(minutes=LOCK_STALE_MINUTES)).isoformat(timespec="seconds"),),
+        )
+        campaign = row_to_dict(conn.execute("SELECT * FROM campaigns WHERE id = ?", (campaign_id,)).fetchone())
+        if not campaign:
+            return False, "Não encontrei essa campanha."
+        lock = conn.execute(
+            "SELECT owner, locked_at FROM campaign_send_locks WHERE campaign_id = ?",
+            (campaign_id,),
+        ).fetchone()
+        if lock:
+            return False, f"Campanha já está em envio por {lock['owner']} desde {lock['locked_at']}."
+        reason = _start_block_reason(campaign, _pending_contact_count(conn, campaign_id), allow_resume)
+        if reason:
+            return False, reason
+    return True, ""
+
+
+def _acquire_campaign_lock(campaign_id: int, runner: str, allow_resume: bool) -> str:
+    owner = f"{runner}:{os.getpid()}:{uuid.uuid4().hex[:8]}"
+    stale_before = (datetime.now() - timedelta(minutes=LOCK_STALE_MINUTES)).isoformat(timespec="seconds")
+    with connect() as conn:
+        conn.execute(
+            "DELETE FROM campaign_send_locks WHERE campaign_id = ? AND locked_at <= ?",
+            (campaign_id, stale_before),
+        )
+        campaign = row_to_dict(conn.execute("SELECT * FROM campaigns WHERE id = ?", (campaign_id,)).fetchone())
+        if not campaign:
+            raise CampaignError("Não encontrei essa campanha.")
+        reason = _start_block_reason(campaign, _pending_contact_count(conn, campaign_id), allow_resume)
+        if reason:
+            _send_log(f"BLOCK campaign_id={campaign_id} runner={runner} reason={_preview(reason)}")
+            raise CampaignError(reason)
+        try:
+            conn.execute(
+                """
+                INSERT INTO campaign_send_locks (campaign_id, owner, locked_at)
+                VALUES (?, ?, ?)
+                """,
+                (campaign_id, owner, now_text()),
+            )
+        except sqlite3.IntegrityError as exc:
+            row = conn.execute(
+                "SELECT owner, locked_at FROM campaign_send_locks WHERE campaign_id = ?",
+                (campaign_id,),
+            ).fetchone()
+            current_owner = row["owner"] if row else "outro processo"
+            locked_at = row["locked_at"] if row else ""
+            _send_log(
+                f"BLOCK campaign_id={campaign_id} runner={runner} "
+                f"reason=locked owner={current_owner} locked_at={locked_at}"
+            )
+            raise CampaignError(
+                f"Esta campanha ja esta em envio por {current_owner} desde {locked_at}."
+            ) from exc
+    _send_log(f"LOCK campaign_id={campaign_id} owner={owner}")
+    return owner
+
+
+def _release_campaign_lock(campaign_id: int, owner: str) -> None:
+    with connect() as conn:
+        conn.execute(
+            "DELETE FROM campaign_send_locks WHERE campaign_id = ? AND owner = ?",
+            (campaign_id, owner),
+        )
+    _send_log(f"UNLOCK campaign_id={campaign_id} owner={owner}")
+
+
+def _campaign_contact_status_counts(campaign_id: int) -> dict[str, int]:
+    with connect() as conn:
+        rows = conn.execute(
+            """
+            SELECT status, COUNT(*) AS total
+            FROM campaign_contacts
+            WHERE campaign_id = ?
+            GROUP BY status
+            """,
+            (campaign_id,),
+        ).fetchall()
+    return {str(row["status"]): int(row["total"]) for row in rows}
+
+
+def _final_status_for_campaign(campaign_id: int, stopped: bool) -> str:
+    if stopped:
+        return CAMPAIGN_STATUS_PAUSED
+    counts = _campaign_contact_status_counts(campaign_id)
+    if counts.get(CONTACT_STATUS_WAITING, 0) > 0:
+        return CAMPAIGN_STATUS_PAUSED
+    if counts.get(CONTACT_STATUS_MANUAL_PENDING, 0) > 0:
+        return CAMPAIGN_STATUS_MANUAL_PENDING
+    return CAMPAIGN_STATUS_DONE
+
+
 def send_campaign(
     campaign_id: int,
     client: WhatsAppBusinessClient | None = None,
     progress_callback: ProgressCallback | None = None,
     stop_event: Event | None = None,
+    runner: str = "desktop",
+    allow_resume: bool = False,
+) -> dict[str, int]:
+    lock_owner = _acquire_campaign_lock(campaign_id, runner, allow_resume)
+    try:
+        return _send_campaign_locked(
+            campaign_id,
+            client=client,
+            progress_callback=progress_callback,
+            stop_event=stop_event,
+            runner=runner,
+        )
+    except Exception as exc:
+        _send_log(f"ABORT campaign_id={campaign_id} owner={lock_owner} error={_preview(exc)}")
+        raise
+    finally:
+        _release_campaign_lock(campaign_id, lock_owner)
+
+
+def _send_campaign_locked(
+    campaign_id: int,
+    client: WhatsAppBusinessClient | None = None,
+    progress_callback: ProgressCallback | None = None,
+    stop_event: Event | None = None,
+    runner: str = "desktop",
 ) -> dict[str, int]:
     campaign = get_campaign(campaign_id)
     if not campaign:
         raise CampaignError("Não encontrei essa campanha.")
-    if campaign["status"] == "cancelada":
-        raise CampaignError("Essa campanha foi cancelada e não pode ser enviada.")
+    if str(campaign["status"]) in CAMPAIGN_TERMINAL_STATUSES:
+        raise CampaignError(f"Campanha com status '{campaign['status']}' não pode ser enviada.")
 
     risk = compliance.refresh_campaign_risk(campaign_id)
     if get_setting("block_high_risk_campaigns", "1") == "1" and int(risk["score"]) >= 75:
@@ -425,8 +658,8 @@ def send_campaign(
             "Revise autorizações, contatos bloqueados, mensagem e quantidade antes de enviar."
         )
 
-    client = client or WhatsAppBusinessClient()
     config = load_config()
+    client = client or WhatsAppBusinessClient(config)
     contacts = get_campaign_contacts(campaign_id)
     if not contacts:
         raise CampaignError("Essa campanha não tem clientes selecionados.")
@@ -443,44 +676,61 @@ def send_campaign(
         "bloqueado": 0,
         "sem_autorizacao": 0,
     }
-    _set_campaign_status(campaign_id, "enviando")
+    _set_campaign_status(campaign_id, CAMPAIGN_STATUS_SENDING)
     total = len(contacts)
     session_deadline = _smart_session_deadline()
+    sender_number = config.phone_number_id or "nao_configurado"
+    _send_log(
+        "START "
+        f"campaign_id={campaign_id} campaign={_preview(campaign.get('name'))} runner={runner} "
+        f"contacts={total} mode={config.delivery_mode} dry_run={config.dry_run} "
+        f"sender_number_id={sender_number} template={_preview(campaign.get('template_name') or config.default_template)} "
+        f"risk={risk['score']}%"
+    )
 
     for index, contact in enumerate(contacts, start=1):
         if stop_event and stop_event.is_set():
-            _set_campaign_status(campaign_id, "pausada")
+            _set_campaign_status(campaign_id, CAMPAIGN_STATUS_PAUSED)
+            _send_log(f"STOP_REQUEST campaign_id={campaign_id} at={index}/{total}")
             break
 
         contact_id = int(contact["id"])
         phone = str(contact["phone"])
         name = str(contact["name"])
         previous_status = str(contact.get("campaign_status") or "")
-        if previous_status in {"enviado", "bloqueado", "sem_autorizacao", "aguardando_manual"}:
+        if previous_status in CONTACT_FINAL_STATUSES:
+            _send_log(
+                f"SKIP campaign_id={campaign_id} contact_id={contact_id} phone={phone} "
+                f"reason=already_final previous_status={previous_status}"
+            )
             continue
 
         if int(contact.get("blacklisted") or 0):
             _update_campaign_contact(campaign_id, contact_id, "bloqueado", "Contato na blacklist.")
             log_message(campaign_id, contact_id, phone, name, "bloqueado", "Contato na blacklist.")
             totals["bloqueado"] += 1
+            _send_log(f"SKIP campaign_id={campaign_id} contact_id={contact_id} phone={phone} reason=blacklisted")
             continue
 
         if not int(contact.get("opt_in") or 0):
             _update_campaign_contact(campaign_id, contact_id, "sem_autorizacao", "Contato sem opt-in.")
             log_message(campaign_id, contact_id, phone, name, "sem_autorizacao", "Contato sem opt-in.")
             totals["sem_autorizacao"] += 1
+            _send_log(f"SKIP campaign_id={campaign_id} contact_id={contact_id} phone={phone} reason=no_opt_in")
             continue
 
         if session_deadline and datetime.now() >= session_deadline:
-            _set_campaign_status(campaign_id, "pausada")
+            _set_campaign_status(campaign_id, CAMPAIGN_STATUS_PAUSED)
             message = "Janela máxima de envio inteligente atingida."
+            _send_log(f"PAUSE campaign_id={campaign_id} reason=smart_session_deadline")
             if progress_callback:
                 progress_callback(index, total, message)
             break
 
         if _sent_today_count() >= _smart_daily_limit(config.daily_send_limit):
-            _set_campaign_status(campaign_id, "pausada")
+            _set_campaign_status(campaign_id, CAMPAIGN_STATUS_PAUSED)
             message = "Limite diário de envio atingido."
+            _send_log(f"PAUSE campaign_id={campaign_id} reason=daily_limit")
             if progress_callback:
                 progress_callback(index, total, message)
             break
@@ -490,9 +740,16 @@ def send_campaign(
             campaign_for_send = dict(campaign)
             campaign_for_send["message"] = str(variant.get("body") or campaign["message"])
             campaign_for_send["media_path"] = str(variant.get("media_path") or campaign["media_path"] or "")
+            _send_log(
+                "CONTACT "
+                f"campaign_id={campaign_id} index={index}/{total} contact_id={contact_id} "
+                f"name={_preview(name, 120)} phone={phone} sender_number_id={sender_number} "
+                f"mode={config.delivery_mode} dry_run={config.dry_run} "
+                f"message={_preview(campaign_for_send['message'])}"
+            )
             result = client.send_campaign_message(contact, campaign_for_send)
             status = "simulado" if result.dry_run else result.status
-            contact_status = "aguardando_manual" if status == "pendente_manual" else "enviado"
+            contact_status = CONTACT_STATUS_MANUAL_PENDING if status == "pendente_manual" else CONTACT_STATUS_SENT
             _update_campaign_contact(campaign_id, contact_id, contact_status, "")
             log_message(
                 campaign_id,
@@ -506,12 +763,23 @@ def send_campaign(
                 media_path=campaign_for_send["media_path"],
             )
             totals[status] += 1
+            _send_log(
+                "SUCCESS "
+                f"campaign_id={campaign_id} contact_id={contact_id} phone={phone} "
+                f"status={status} contact_status={contact_status} mode={result.delivery_mode or config.delivery_mode} "
+                f"provider_message_id={result.provider_message_id or '-'} "
+                f"manual_link={'yes' if result.action_url else 'no'}"
+            )
             message = f"{name}: {status}"
         except (WhatsAppAPIError, OSError, ValueError) as exc:
             error = str(exc)
             _update_campaign_contact(campaign_id, contact_id, "falhou", error)
             log_message(campaign_id, contact_id, phone, name, "falhou", error)
             totals["falhou"] += 1
+            _send_log(
+                f"ERROR campaign_id={campaign_id} contact_id={contact_id} phone={phone} "
+                f"mode={config.delivery_mode} error={_preview(error)}"
+            )
             message = f"{name}: falhou - {error}"
 
         if progress_callback:
@@ -519,10 +787,11 @@ def send_campaign(
 
         _sleep_between_sends(index, total, config.send_interval_seconds)
 
-    final_status = "pausada" if stop_event and stop_event.is_set() else "concluída"
+    final_status = _final_status_for_campaign(campaign_id, bool(stop_event and stop_event.is_set()))
     current = get_campaign(campaign_id)
-    if current and current["status"] == "enviando":
+    if current and current["status"] == CAMPAIGN_STATUS_SENDING:
         _set_campaign_status(campaign_id, final_status)
+    _send_log(f"FINAL campaign_id={campaign_id} status={final_status} totals={totals}")
     return totals
 
 
