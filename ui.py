@@ -1171,8 +1171,12 @@ class MezzoldApp(SettingsScreenMixin, tk.Tk):
         delay_max = tk.StringVar(value=str(campaigns.DEFAULT_DELAY_MAX_SECONDS))
         delay_info = tk.StringVar(value="")
         delay_customized = tk.BooleanVar(value=False)
+        delivery_mode_preview = tk.StringVar(
+            value=f"Modo de envio: {whatsapp.delivery_mode_label(whatsapp.load_config().delivery_mode)}"
+        )
 
         self._entry(form, "Nome para identificar esta campanha", name).pack(fill="x", pady=(0, 10))
+        ttk.Label(form, textvariable=delivery_mode_preview, style="Muted.TLabel", wraplength=640).pack(anchor="w", pady=(0, 10))
         category_frame = ttk.Frame(form, style="Panel.TFrame")
         category_frame.pack(fill="x", pady=(0, 10))
         ttk.Label(category_frame, text="Tipo de mensagem", style="Panel.TLabel").pack(anchor="w", pady=(0, 4))
@@ -1370,6 +1374,7 @@ class MezzoldApp(SettingsScreenMixin, tk.Tk):
                     scheduled_at=scheduled_value or None,
                     delay_min_seconds=delay_min_value,
                     delay_max_seconds=delay_max_value,
+                    delivery_mode=whatsapp.load_config().delivery_mode,
                 )
             except campaigns.CampaignError as exc:
                 messagebox.showerror(APP_TITLE, str(exc))
@@ -1471,6 +1476,7 @@ class MezzoldApp(SettingsScreenMixin, tk.Tk):
         scheduled_at = tk.StringVar()
         delay_min_var = tk.StringVar()
         delay_max_var = tk.StringVar()
+        delivery_mode_var = tk.StringVar()
         delay_details = tk.StringVar()
         progress = tk.StringVar(value="Escolha uma campanha.")
         details = tk.StringVar(value="Nenhuma campanha selecionada.")
@@ -1497,12 +1503,13 @@ class MezzoldApp(SettingsScreenMixin, tk.Tk):
 
         ttk.Label(frame, textvariable=empty_text, style="Muted.TLabel").pack(anchor="w", pady=(0, 6))
 
-        columns = ("name", "status", "risk", "scheduled", "folder", "delay", "total", "sent", "failed", "progress", "updated")
+        columns = ("name", "status", "risk", "mode", "scheduled", "folder", "delay", "total", "sent", "failed", "progress", "updated")
         tree = ttk.Treeview(frame, columns=columns, show="headings", selectmode="browse", height=13)
         headings = {
             "name": "Nome da campanha",
             "status": "Status",
             "risk": "Risco",
+            "mode": "Modo",
             "scheduled": "Agendamento",
             "folder": "Pasta",
             "delay": "Delay",
@@ -1516,6 +1523,7 @@ class MezzoldApp(SettingsScreenMixin, tk.Tk):
             "name": 220,
             "status": 110,
             "risk": 70,
+            "mode": 180,
             "scheduled": 145,
             "folder": 145,
             "delay": 90,
@@ -1539,6 +1547,22 @@ class MezzoldApp(SettingsScreenMixin, tk.Tk):
         self._entry(edit_row, "Agendamento", scheduled_at).pack(side="left", fill="x", expand=True, padx=(0, 8))
         self._entry(edit_row, "Delay min", delay_min_var).pack(side="left", fill="x", expand=True, padx=(0, 8))
         self._entry(edit_row, "Delay max", delay_max_var).pack(side="left", fill="x", expand=True, padx=(0, 8))
+        mode_holder = ttk.Frame(edit_row, style="Panel.TFrame")
+        mode_holder.pack(side="left", fill="x", expand=True, padx=(0, 8))
+        ttk.Label(mode_holder, text="Modo de envio", style="Panel.TLabel").pack(anchor="w", pady=(0, 4))
+        mode_options = {
+            "API Oficial Meta": whatsapp.DELIVERY_MODE_OFFICIAL_API,
+            "WhatsApp Web Experimental": whatsapp.DELIVERY_MODE_WHATSAPP_WEB_EXPERIMENTAL,
+            "Manual assistido": whatsapp.DELIVERY_MODE_MANUAL_ASSISTED,
+        }
+        mode_labels = {value: label for label, value in mode_options.items()}
+        ttk.Combobox(
+            mode_holder,
+            textvariable=delivery_mode_var,
+            values=tuple(mode_options.keys()),
+            state="readonly",
+            width=24,
+        ).pack(fill="x")
         save_button = ttk.Button(edit_row, text="Salvar alteracoes")
         save_button.pack(side="left", padx=(0, 8), pady=(20, 0))
         ttk.Label(edit_panel, textvariable=delay_details, style="Muted.TLabel").pack(anchor="w", pady=(8, 0))
@@ -1580,6 +1604,7 @@ class MezzoldApp(SettingsScreenMixin, tk.Tk):
                 scheduled_at.set("")
                 delay_min_var.set("")
                 delay_max_var.set("")
+                delivery_mode_var.set("")
                 delay_details.set("")
                 details.set("Nenhuma campanha selecionada.")
                 progress.set("Escolha uma campanha.")
@@ -1588,6 +1613,8 @@ class MezzoldApp(SettingsScreenMixin, tk.Tk):
             scheduled_at.set(str(item.get("scheduled_at") or ""))
             delay_min_var.set(str(item.get("delay_min_seconds") or campaigns.DEFAULT_DELAY_MIN_SECONDS))
             delay_max_var.set(str(item.get("delay_max_seconds") or campaigns.DEFAULT_DELAY_MAX_SECONDS))
+            mode_value = str(item.get("delivery_mode") or whatsapp.DELIVERY_MODE_OFFICIAL_API)
+            delivery_mode_var.set(mode_labels.get(mode_value, "API Oficial Meta"))
             level, delay_message = campaigns.delay_recommendation_message(delay_min_var.get(), delay_max_var.get())
             delay_details.set(f"{delay_message} Configurado: {delay_label(item)}.")
             total = int(item.get("total_contacts") or 0)
@@ -1596,6 +1623,7 @@ class MezzoldApp(SettingsScreenMixin, tk.Tk):
             details.set(
                 f"Status: {friendly_status(item.get('status'))} | "
                 f"Pasta: {folder_label(item)} | "
+                f"Modo: {whatsapp.delivery_mode_label(item.get('delivery_mode'))} | "
                 f"Delay: {delay_label(item)} | "
                 f"Contatos: {total} | Enviados: {sent} | Falhas: {failed} | "
                 f"Atualizada em: {item.get('updated_at') or ''}"
@@ -1624,6 +1652,7 @@ class MezzoldApp(SettingsScreenMixin, tk.Tk):
                         item.get("name") or "",
                         friendly_status(item.get("status")),
                         f"{item.get('risk_score') or 0}%",
+                        whatsapp.delivery_mode_label(item.get("delivery_mode")),
                         item.get("scheduled_at") or "",
                         folder_label(item),
                         delay_label(item),
@@ -1706,6 +1735,7 @@ class MezzoldApp(SettingsScreenMixin, tk.Tk):
                     scheduled_value,
                     delay_min_seconds=delay_min_value,
                     delay_max_seconds=delay_max_value,
+                    delivery_mode=mode_options.get(delivery_mode_var.get(), whatsapp.DELIVERY_MODE_OFFICIAL_API),
                 )
             except campaigns.CampaignError as exc:
                 messagebox.showerror(APP_TITLE, str(exc))
@@ -1730,6 +1760,7 @@ class MezzoldApp(SettingsScreenMixin, tk.Tk):
                 f"{campaign.get('name') or ''}\n"
                 f"Status: {friendly_status(campaign.get('status'))} | "
                 f"Pasta: {campaign.get('folder_name') or 'Campanha antiga'} | "
+                f"Modo: {whatsapp.delivery_mode_label(campaign.get('delivery_mode'))} | "
                 f"Agendamento: {campaign.get('scheduled_at') or ''}\n"
                 f"Template: {campaign.get('template_name') or ''} | Idioma: {campaign.get('template_language') or ''} | "
                 f"Delay: {campaign.get('delay_min_seconds') or campaigns.DEFAULT_DELAY_MIN_SECONDS}-{campaign.get('delay_max_seconds') or campaigns.DEFAULT_DELAY_MAX_SECONDS}s"
@@ -1804,12 +1835,13 @@ class MezzoldApp(SettingsScreenMixin, tk.Tk):
                 text="" if logs else "Esta campanha ainda nao tem historico de envio.",
                 style="Muted.TLabel",
             ).pack(anchor="w", pady=(0, 8))
-            log_tree = ttk.Treeview(panel, columns=("created", "recipient", "phone", "status", "action", "error"), show="headings")
+            log_tree = ttk.Treeview(panel, columns=("created", "recipient", "phone", "status", "mode", "action", "error"), show="headings")
             for column, heading, width in [
                 ("created", "Data/hora", 145),
                 ("recipient", "Contato", 170),
                 ("phone", "Telefone", 130),
                 ("status", "Status", 120),
+                ("mode", "Modo", 180),
                 ("action", "Manual", 110),
                 ("error", "Erro", 360),
             ]:
@@ -1826,6 +1858,7 @@ class MezzoldApp(SettingsScreenMixin, tk.Tk):
                         log.get("recipient_name") or "",
                         log.get("phone") or "",
                         friendly_status(log.get("status")),
+                        whatsapp.delivery_mode_label(log.get("delivery_mode")),
                         "Abrir" if log.get("action_url") else "",
                         log.get("error_message") or "",
                     ),
@@ -1966,7 +1999,7 @@ class MezzoldApp(SettingsScreenMixin, tk.Tk):
         ttk.Button(top, text="Atualizar", command=self.show_history).pack(side="left")
         ttk.Button(top, text="Abrir WhatsApp manual", command=lambda: open_action()).pack(side="left", padx=(8, 0))
         ttk.Button(top, text="Telefones já usados", command=self.show_sent_numbers).pack(side="left", padx=(8, 0))
-        columns = ("created_at", "campaign", "recipient", "phone", "status", "action", "error")
+        columns = ("created_at", "campaign", "recipient", "phone", "status", "mode", "action", "error")
         tree = ttk.Treeview(frame, columns=columns, show="headings")
         for column, heading, width in [
             ("created_at", "Data/hora", 150),
@@ -1974,6 +2007,7 @@ class MezzoldApp(SettingsScreenMixin, tk.Tk):
             ("recipient", "Contato", 160),
             ("phone", "Telefone", 130),
             ("status", "Status", 110),
+            ("mode", "Modo", 180),
             ("action", "Abrir manualmente", 160),
             ("error", "Erro", 360),
         ]:
@@ -1991,6 +2025,7 @@ class MezzoldApp(SettingsScreenMixin, tk.Tk):
                     item["recipient_name"],
                     item["phone"],
                     friendly_status(item["status"]),
+                    whatsapp.delivery_mode_label(item.get("delivery_mode")),
                     "Abrir WhatsApp" if item.get("action_url") else "",
                     item["error_message"],
                 ),
@@ -2387,6 +2422,34 @@ class MezzoldApp(SettingsScreenMixin, tk.Tk):
             if not proceed:
                 return
 
+        explicit_confirmation = False
+        config = whatsapp.load_config()
+        campaign = campaigns.get_campaign(campaign_id)
+        campaign_mode = whatsapp.normalize_delivery_mode(
+            (campaign or {}).get("delivery_mode") or config.delivery_mode
+        )
+        if campaign_mode == whatsapp.DELIVERY_MODE_WHATSAPP_WEB_EXPERIMENTAL and not config.dry_run:
+            if not interactive:
+                self._set_status("WhatsApp Web Experimental exige confirmacao manual antes de enviar.")
+                return
+            contacts_total = len(campaigns.get_campaign_contacts(campaign_id))
+            delay_min = int((campaign or {}).get("delay_min_seconds") or campaigns.DEFAULT_DELAY_MIN_SECONDS)
+            delay_max = int((campaign or {}).get("delay_max_seconds") or campaigns.DEFAULT_DELAY_MAX_SECONDS)
+            proceed = messagebox.askyesno(
+                APP_TITLE,
+                "Confirmar envio via WhatsApp Web Experimental\n\n"
+                f"Campanha: {(campaign or {}).get('name') or campaign_id}\n"
+                f"Pasta de contatos: {(campaign or {}).get('folder_name') or 'Campanha antiga'}\n"
+                f"Total de contatos: {contacts_total}\n"
+                f"Delay: {delay_min}-{delay_max}s\n\n"
+                "WhatsApp Web nao e API oficial. Ha risco de bloqueio, limitacao ou desconexao da conta. "
+                "Use somente com opt-in/consentimento, respeitando LGPD e regras do WhatsApp.\n\n"
+                "Deseja iniciar mesmo assim?",
+            )
+            if not proceed:
+                return
+            explicit_confirmation = True
+
         event = threading.Event()
         self.running_events[campaign_id] = event
 
@@ -2404,6 +2467,7 @@ class MezzoldApp(SettingsScreenMixin, tk.Tk):
                     stop_event=event,
                     runner=source,
                     allow_resume=allow_resume,
+                    explicit_user_confirmation=explicit_confirmation,
                 )
                 done = (
                     f"Campanha #{campaign_id}: enviados {totals['enviado']}, "

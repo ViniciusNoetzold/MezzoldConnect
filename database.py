@@ -120,6 +120,7 @@ def initialize_database() -> None:
                 folder_name TEXT DEFAULT '',
                 delay_min_seconds INTEGER NOT NULL DEFAULT 30,
                 delay_max_seconds INTEGER NOT NULL DEFAULT 45,
+                delivery_mode TEXT NOT NULL DEFAULT 'official_api',
                 risk_score INTEGER NOT NULL DEFAULT 0,
                 risk_level TEXT DEFAULT 'pendente',
                 risk_notes TEXT DEFAULT '',
@@ -159,6 +160,7 @@ def initialize_database() -> None:
                 error_message TEXT DEFAULT '',
                 provider_message_id TEXT DEFAULT '',
                 action_url TEXT DEFAULT '',
+                delivery_mode TEXT NOT NULL DEFAULT 'official_api',
                 message_body TEXT DEFAULT '',
                 media_path TEXT DEFAULT '',
                 created_at TEXT NOT NULL,
@@ -265,10 +267,12 @@ def initialize_database() -> None:
         _ensure_column(conn, "campaigns", "folder_name", "TEXT DEFAULT ''")
         _ensure_column(conn, "campaigns", "delay_min_seconds", "INTEGER NOT NULL DEFAULT 30")
         _ensure_column(conn, "campaigns", "delay_max_seconds", "INTEGER NOT NULL DEFAULT 45")
+        _ensure_column(conn, "campaigns", "delivery_mode", "TEXT NOT NULL DEFAULT 'official_api'")
         _ensure_column(conn, "campaigns", "risk_score", "INTEGER NOT NULL DEFAULT 0")
         _ensure_column(conn, "campaigns", "risk_level", "TEXT DEFAULT 'pendente'")
         _ensure_column(conn, "campaigns", "risk_notes", "TEXT DEFAULT ''")
         _ensure_column(conn, "message_logs", "action_url", "TEXT DEFAULT ''")
+        _ensure_column(conn, "message_logs", "delivery_mode", "TEXT NOT NULL DEFAULT 'official_api'")
         _ensure_column(conn, "message_logs", "message_body", "TEXT DEFAULT ''")
         _ensure_column(conn, "message_logs", "media_path", "TEXT DEFAULT ''")
         _migrate_contact_folders(conn)
