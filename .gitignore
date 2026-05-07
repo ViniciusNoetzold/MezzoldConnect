@@ -13,6 +13,7 @@ installer/*.sed
 
 .env
 data/
+whatsapp_web_experimental_profile/
 *.sqlite3
 
 usuarios.csv

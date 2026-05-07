@@ -54,7 +54,21 @@ class DesktopSmokeTests(unittest.TestCase):
         self.assertEqual(self.database.get_setting("company_name"), "Mezzold")
         self.database.set_setting("company_name", "Smoke Test")
         self.assertEqual(self.database.get_setting("company_name"), "Smoke Test")
+        self.database.set_setting("app_theme", "dark")
+        self.database.set_setting("ui_density", "compact")
+        self.database.set_setting("app_update_channel", "beta")
+        self.assertEqual(self.database.get_setting("app_theme"), "dark")
+        self.assertEqual(self.database.get_setting("ui_density"), "compact")
+        self.assertEqual(self.database.get_setting("app_update_channel"), "beta")
         self.assertEqual(self.database.get_setting("app_current_version"), self.database.APP_VERSION)
+
+    def test_settings_screen_presets_preserve_custom_values(self) -> None:
+        settings = importlib.import_module("screens.settings")
+
+        self.assertEqual(settings._options_with_current(("50", "100"), "250"), ("50", "100", "250"))
+        self.assertEqual(settings._options_with_current(("50", "100"), "100"), ("50", "100"))
+        self.assertEqual(settings._delay_preset_for_values("60", "120"), "Seguro")
+        self.assertEqual(settings._delay_preset_for_values("17", "31"), settings.CUSTOM_DELAY_PRESET)
 
     def test_import_contacts_from_csv_txt_xlsx_and_list_by_folder(self) -> None:
         manual_folder_id = self.contacts.create_folder("Leads Manuais")
@@ -141,6 +155,133 @@ class DesktopSmokeTests(unittest.TestCase):
         self.assertEqual(len(logs), 1)
         self.assertEqual(logs[0]["status"], "simulado")
         self.assertTrue(str(logs[0]["provider_message_id"]).startswith("dryrun-"))
+        self.assertEqual(logs[0]["delivery_mode"], "official_api")
+
+    def test_whatsapp_web_dry_run_never_opens_provider_and_logs_mode(self) -> None:
+        self.database.set_setting("block_high_risk_campaigns", "0")
+        self.whatsapp.save_config(
+            self.whatsapp.WhatsAppConfig(
+                delivery_mode=self.whatsapp.DELIVERY_MODE_WHATSAPP_WEB_EXPERIMENTAL,
+                dry_run=True,
+                send_interval_seconds=0.5,
+                daily_send_limit=10,
+            )
+        )
+        contact_id = self.contacts.create_contact(
+            "Cliente Web Teste",
+            "+551199990020",
+            group_name="Web Teste",
+            opt_in=1,
+        )
+        campaign_id = self.campaigns.create_campaign(
+            name="Web Experimental Dry Run",
+            message="Ola, teste web.",
+            contact_ids=[contact_id],
+            folder_name="Web Teste",
+            delay_min_seconds=10,
+            delay_max_seconds=12,
+        )
+
+        original_provider = self.whatsapp.get_whatsapp_web_provider
+
+        def fail_provider(*_args: object, **_kwargs: object) -> object:
+            raise AssertionError("Dry-run nao deve abrir provider WhatsApp Web.")
+
+        self.whatsapp.get_whatsapp_web_provider = fail_provider
+        try:
+            totals = self.campaigns.send_campaign(campaign_id, runner="desktop_web_dryrun")
+        finally:
+            self.whatsapp.get_whatsapp_web_provider = original_provider
+
+        self.assertEqual(totals["simulado"], 1)
+        logs = self.campaigns.list_campaign_logs(campaign_id)
+        self.assertEqual(logs[0]["status"], "simulado")
+        self.assertEqual(logs[0]["delivery_mode"], self.whatsapp.DELIVERY_MODE_WHATSAPP_WEB_EXPERIMENTAL)
+
+    def test_whatsapp_web_real_send_requires_explicit_confirmation(self) -> None:
+        self.database.set_setting("block_high_risk_campaigns", "0")
+        self.whatsapp.save_config(
+            self.whatsapp.WhatsAppConfig(
+                delivery_mode=self.whatsapp.DELIVERY_MODE_WHATSAPP_WEB_EXPERIMENTAL,
+                dry_run=False,
+                send_interval_seconds=30,
+                daily_send_limit=10,
+            )
+        )
+        contact_id = self.contacts.create_contact(
+            "Cliente Web Real",
+            "+551199990021",
+            group_name="Web Real",
+            opt_in=1,
+        )
+        campaign_id = self.campaigns.create_campaign(
+            name="Web Sem Confirmacao",
+            message="Ola, teste confirmacao.",
+            contact_ids=[contact_id],
+            folder_name="Web Real",
+            delay_min_seconds=30,
+            delay_max_seconds=45,
+        )
+
+        with self.assertRaises(self.campaigns.CampaignError):
+            self.campaigns.send_campaign(campaign_id, runner="desktop_web_real")
+
+    def test_campaign_blocks_blacklist_and_missing_opt_in_before_send(self) -> None:
+        self.database.set_setting("block_high_risk_campaigns", "0")
+        self.whatsapp.save_config(
+            self.whatsapp.WhatsAppConfig(
+                delivery_mode="official_api",
+                dry_run=True,
+                send_interval_seconds=0.5,
+                daily_send_limit=10,
+            )
+        )
+        no_opt_in_id = self.contacts.create_contact(
+            "Sem Opt In",
+            "+551199990030",
+            group_name="Bloqueios",
+            opt_in=0,
+        )
+        blacklisted_id = self.contacts.create_contact(
+            "Bloqueado",
+            "+551199990031",
+            group_name="Bloqueios",
+            opt_in=1,
+            blacklisted=True,
+        )
+        campaign_id = self.campaigns.create_campaign(
+            name="Bloqueios",
+            message="Ola.",
+            contact_ids=[no_opt_in_id, blacklisted_id],
+            folder_name="Bloqueios",
+            delay_min_seconds=1,
+            delay_max_seconds=2,
+        )
+
+        totals = self.campaigns.send_campaign(campaign_id, runner="desktop_blocks")
+
+        self.assertEqual(totals["sem_autorizacao"], 1)
+        self.assertEqual(totals["bloqueado"], 1)
+        self.assertEqual(totals["simulado"], 0)
+        statuses = {log["status"] for log in self.campaigns.list_campaign_logs(campaign_id)}
+        self.assertEqual(statuses, {"sem_autorizacao", "bloqueado"})
+
+    def test_campaign_without_mode_defaults_to_official_api(self) -> None:
+        contact_id = self.contacts.create_contact(
+            "Cliente Padrao",
+            "+551199990040",
+            group_name="Padrao",
+            opt_in=1,
+        )
+        campaign_id = self.campaigns.create_campaign(
+            name="Campanha Padrao",
+            message="Ola.",
+            contact_ids=[contact_id],
+            folder_name="Padrao",
+        )
+
+        campaign = self.campaigns.get_campaign(campaign_id)
+        self.assertEqual(campaign["delivery_mode"], "official_api")
 
     def test_whatsapp_settings_do_not_store_plain_token(self) -> None:
         secret = "smoke-token-value"

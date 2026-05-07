@@ -20,6 +20,32 @@ WHATSAPP_POLICY_URL = "https://www.whatsapp.com/legal/business-policy/"
 META_CLOUD_API_URL = "https://meta-preview.mintlify.io/docs/whatsapp/cloud-api/overview"
 APP_UPDATES_URL = app_update.DEFAULT_DOWNLOAD_URL
 
+DAILY_LIMIT_OPTIONS = ("50", "100", "250", "500")
+UPDATE_CHANNEL_OPTIONS = ("stable", "beta", "dev")
+LANGUAGE_OPTIONS = ("pt_BR", "en_US")
+FONT_SIZE_OPTIONS = tuple(str(value) for value in range(9, 15))
+DELAY_PRESETS = {
+    "Seguro": ("60", "120", "60"),
+    "Moderado": ("30", "45", "30"),
+    "Rapido": ("10", "20", "10"),
+}
+CUSTOM_DELAY_PRESET = "Personalizado"
+
+
+def _options_with_current(options: tuple[str, ...], current: object) -> tuple[str, ...]:
+    value = str(current or "").strip()
+    if value and value not in options:
+        return (*options, value)
+    return options
+
+
+def _delay_preset_for_values(minimum: object, maximum: object) -> str:
+    pair = (str(minimum or "").strip(), str(maximum or "").strip())
+    for label, (preset_min, preset_max, _fallback) in DELAY_PRESETS.items():
+        if pair == (preset_min, preset_max):
+            return label
+    return CUSTOM_DELAY_PRESET
+
 
 class SettingsScreenMixin:
     def __init__(self, *args: object, **kwargs: object) -> None:
@@ -52,10 +78,19 @@ class SettingsScreenMixin:
         columns.columnconfigure(0, weight=1, uniform="settings")
         columns.columnconfigure(1, weight=1, uniform="settings")
 
-        def section(parent: ttk.Frame, title: str, note: str = "") -> None:
-            ttk.Label(parent, text=title, style="Panel.TLabel", font=("Segoe UI Semibold", 12)).pack(anchor="w", pady=(18, 0))
+        def section(parent: ttk.Frame, title: str, note: str = "") -> ttk.LabelFrame:
+            block = ttk.LabelFrame(parent, text=title, padding=12)
+            block.pack(fill="x", pady=(0, 12))
             if note:
-                ttk.Label(parent, text=note, style="Muted.TLabel", wraplength=500).pack(anchor="w", pady=(4, 0))
+                ttk.Label(block, text=note, style="Muted.TLabel", wraplength=500).pack(anchor="w", pady=(0, 8))
+            return block
+
+        def combo(parent: ttk.Frame, label: str, variable: tk.StringVar, values: tuple[str, ...]) -> ttk.Frame:
+            holder = ttk.Frame(parent)
+            holder.pack(fill="x", pady=(8, 0))
+            ttk.Label(holder, text=label).pack(anchor="w", pady=(0, 4))
+            ttk.Combobox(holder, textvariable=variable, values=values, state="readonly").pack(fill="x")
+            return holder
 
         token = tk.StringVar()
         phone_number_id = tk.StringVar(value=config.phone_number_id)
@@ -67,12 +102,24 @@ class SettingsScreenMixin:
         company_name = tk.StringVar(value=get_setting("company_name", "Mezzold"))
         interval = tk.StringVar(value=str(config.send_interval_seconds))
         daily_limit = tk.StringVar(value=str(config.daily_send_limit))
+        daily_limit_values = _options_with_current(DAILY_LIMIT_OPTIONS, daily_limit.get())
+        delay_preset = tk.StringVar(
+            value=_delay_preset_for_values(
+                get_setting("smart_min_interval_seconds", "30"),
+                get_setting("smart_max_interval_seconds", "45"),
+            )
+        )
+        delay_notice = tk.StringVar()
         delivery_modes = {
-            "Envio oficial pela Meta": "official_api",
-            "Modo manual com link": "manual_assisted",
+            "API Oficial Meta": whatsapp.DELIVERY_MODE_OFFICIAL_API,
+            "WhatsApp Web Experimental": whatsapp.DELIVERY_MODE_WHATSAPP_WEB_EXPERIMENTAL,
+            "Manual / Dry-run": whatsapp.DELIVERY_MODE_MANUAL_ASSISTED,
         }
         delivery_mode_labels = {value: label for label, value in delivery_modes.items()}
-        delivery_mode = tk.StringVar(value=delivery_mode_labels.get(config.delivery_mode, "Envio oficial pela Meta"))
+        delivery_mode = tk.StringVar(value=delivery_mode_labels.get(config.delivery_mode, "API Oficial Meta"))
+        web_status_data = whatsapp.get_whatsapp_web_status()
+        web_status = tk.StringVar(value=f"WhatsApp Web: {web_status_data['label']}.")
+        web_warning = tk.StringVar()
         dry_run = tk.BooleanVar(value=config.dry_run)
         block_high_risk = tk.BooleanVar(value=get_setting("block_high_risk_campaigns", "1") == "1")
         smart_send = tk.BooleanVar(value=get_setting("smart_send_enabled", "0") == "1")
@@ -93,18 +140,21 @@ class SettingsScreenMixin:
         theme_options = {"Claro": "light", "Escuro": "dark"}
         theme_labels = {value: label for label, value in theme_options.items()}
         theme = tk.StringVar(value=theme_labels.get(get_setting("app_theme", "light"), "Claro"))
-        density_options = {"Compacta": "compact", "Normal": "normal", "Confortável": "comfortable"}
+        density_options = {"Compacta": "compact", "Normal": "normal", "Confortavel": "comfortable"}
         density_labels = {value: label for label, value in density_options.items()}
         density = tk.StringVar(value=density_labels.get(get_setting("ui_density", "normal"), "Normal"))
         font_size = tk.StringVar(value=get_setting("ui_font_size", "10"))
         update_manifest_url = tk.StringVar(value=get_setting("app_update_manifest_url", ""))
         update_download_url = tk.StringVar(value=get_setting("app_update_download_url", APP_UPDATES_URL))
         update_channel = tk.StringVar(value=get_setting("app_update_channel", app_update.DEFAULT_CHANNEL))
+        update_channel_values = _options_with_current(UPDATE_CHANNEL_OPTIONS, update_channel.get())
+        language_values = _options_with_current(LANGUAGE_OPTIONS, default_language.get())
+        font_size_values = _options_with_current(FONT_SIZE_OPTIONS, font_size.get())
         update_status = tk.StringVar(value="Pronto para verificar atualizações.")
 
-        section(left, "Geral")
-        self._entry(left, "Nome da empresa", company_name).pack(fill="x", pady=(10, 0))
-        visual_grid = ttk.Frame(left, style="Panel.TFrame")
+        appearance = section(left, "Aparência")
+        self._entry(appearance, "Nome da empresa", company_name).pack(fill="x", pady=(10, 0))
+        visual_grid = ttk.Frame(appearance, style="Panel.TFrame")
         visual_grid.pack(fill="x", pady=(10, 0))
         theme_holder = ttk.Frame(visual_grid, style="Panel.TFrame")
         theme_holder.grid(row=0, column=0, sticky="ew", padx=(0, 8))
@@ -116,37 +166,53 @@ class SettingsScreenMixin:
         ttk.Combobox(density_holder, textvariable=density, values=tuple(density_options.keys()), state="readonly").pack(fill="x")
         visual_grid.columnconfigure(0, weight=1)
         visual_grid.columnconfigure(1, weight=1)
-        self._entry(left, "Tamanho da fonte (9 a 14)", font_size).pack(fill="x", pady=(10, 0))
+        combo(appearance, "Tamanho da fonte", font_size, font_size_values)
 
-        section(left, "Atualizações", "O app nunca substitui arquivos de dados. Sem manifesto configurado, o botão usa a página oficial de download.")
-        ttk.Label(left, text=f"Versão atual: {APP_VERSION}", style="Panel.TLabel").pack(anchor="w", pady=(8, 0))
-        self._entry(left, "URL do manifesto de atualização (opcional)", update_manifest_url).pack(fill="x", pady=(10, 0))
-        self._entry(left, "Página de download", update_download_url).pack(fill="x", pady=(10, 0))
-        self._entry(left, "Canal de atualização", update_channel).pack(fill="x", pady=(10, 0))
-        ttk.Label(left, textvariable=update_status, style="Muted.TLabel", wraplength=500).pack(anchor="w", pady=(8, 0))
+        updates = section(left, "Atualizações", "O app nunca substitui arquivos de dados. Sem manifesto configurado, o botão usa a página oficial de download.")
+        ttk.Label(updates, text=f"Versão atual: {APP_VERSION}", style="Panel.TLabel").pack(anchor="w", pady=(8, 0))
+        combo(updates, "Canal de atualização", update_channel, update_channel_values)
+        ttk.Label(updates, textvariable=update_status, style="Muted.TLabel", wraplength=500).pack(anchor="w", pady=(8, 0))
 
         license_data = self._load_license()
         license_key = tk.StringVar(value=str(license_data.get("license_key", "")))
         license_plan = tk.StringVar(value=str(license_data.get("plan_name", "")))
         license_until = tk.StringVar(value=str(license_data.get("valid_until", "")))
-        section(left, "Licença")
+        advanced = section(
+            left,
+            "Área avançada / desenvolvimento",
+            "Campos técnicos preservados para compatibilidade. O cliente comum não precisa alterar esta área.",
+        )
         for label, variable in [
             ("Código da licença", license_key),
             ("Plano", license_plan),
             ("Validade", license_until),
         ]:
-            self._entry(left, label, variable).pack(fill="x", pady=(10, 0))
+            self._entry(advanced, label, variable).pack(fill="x", pady=(10, 0))
+        self._entry(advanced, "URL do manifesto de atualização (opcional)", update_manifest_url).pack(fill="x", pady=(10, 0))
+        self._entry(advanced, "Página de download", update_download_url).pack(fill="x", pady=(10, 0))
+        self._entry(advanced, "Intervalo global de fallback (segundos)", interval).pack(fill="x", pady=(10, 0))
 
-        section(left, "Envio", "Configurações gerais usadas por campanhas e limites de segurança.")
-        for label, variable in [
-            ("Intervalo global de fallback (segundos)", interval),
-            ("Máximo de envios por dia", daily_limit),
-        ]:
-            self._entry(left, label, variable).pack(fill="x", pady=(10, 0))
-        ttk.Checkbutton(left, text="Impedir envio quando o risco estiver muito alto", variable=block_high_risk).pack(anchor="w", pady=(12, 0))
-        ttk.Checkbutton(left, text="Usar pausas automáticas entre mensagens", variable=smart_send).pack(anchor="w", pady=(8, 0))
+        security = section(
+            left,
+            "Segurança de envio",
+            "Dry-run nao envia mensagens reais. Delays muito baixos podem ser bloqueados pelo sistema.",
+        )
+        combo(security, "Máximo de envios por dia", daily_limit, daily_limit_values)
+        ttk.Label(security, text="Preset de delay entre mensagens", style="Panel.TLabel").pack(anchor="w", pady=(10, 4))
+        delay_combo = ttk.Combobox(
+            security,
+            textvariable=delay_preset,
+            values=(*DELAY_PRESETS.keys(), CUSTOM_DELAY_PRESET),
+            state="readonly",
+        )
+        delay_combo.pack(fill="x")
+        ttk.Label(security, textvariable=delay_notice, style="Muted.TLabel", wraplength=500).pack(anchor="w", pady=(6, 0))
+        ttk.Checkbutton(security, text="Modo teste / dry-run: registrar sem enviar de verdade", variable=dry_run).pack(anchor="w", pady=(12, 0))
+        ttk.Checkbutton(security, text="Impedir envio quando o risco estiver muito alto", variable=block_high_risk).pack(anchor="w", pady=(8, 0))
+        ttk.Checkbutton(security, text="Usar pausas automáticas entre mensagens", variable=smart_send).pack(anchor="w", pady=(8, 0))
 
-        smart_grid = ttk.Frame(left, style="Panel.TFrame")
+        ttk.Label(advanced, text="Pausas automaticas e delays personalizados", style="Panel.TLabel").pack(anchor="w", pady=(12, 0))
+        smart_grid = ttk.Frame(advanced, style="Panel.TFrame")
         smart_grid.pack(fill="x")
         for index, (label, variable) in enumerate([
             ("Espera mínima (s)", smart_min_interval),
@@ -162,42 +228,53 @@ class SettingsScreenMixin:
             smart_grid.columnconfigure(index % 2, weight=1)
             self._entry(holder, label, variable).pack(fill="x")
 
-        section(right, "WhatsApp / Meta / Manual")
+        mode_block = section(right, "Modo de envio", "A API Oficial Meta é o modo recomendado e principal.")
+        ttk.Label(mode_block, text="Como o app deve enviar", style="Panel.TLabel").pack(anchor="w", pady=(10, 4))
+        delivery_combo = ttk.Combobox(mode_block, textvariable=delivery_mode, values=tuple(delivery_modes.keys()), state="readonly")
+        delivery_combo.pack(fill="x")
+        ttk.Label(mode_block, textvariable=web_warning, style="Muted.TLabel", wraplength=500).pack(anchor="w", pady=(6, 0))
+        web_panel = ttk.Frame(mode_block, style="Panel.TFrame")
+        web_panel.pack(fill="x", pady=(10, 0))
+        ttk.Label(web_panel, textvariable=web_status, style="Panel.TLabel").pack(side="left")
+        ttk.Button(
+            web_panel,
+            text="Conectar / abrir WhatsApp Web",
+            command=lambda: open_whatsapp_web(),
+        ).pack(side="right")
+
+        meta_block = section(right, "WhatsApp / Meta")
         ttk.Label(
-            right,
+            meta_block,
             text="O token é protegido pela DPAPI no Windows e nunca é exibido aqui. Deixe em branco para manter o token atual.",
             style="Muted.TLabel",
             wraplength=500,
         ).pack(anchor="w", pady=(4, 0))
         token_state = "Token: configurado e oculto." if config.token or get_setting("whatsapp_token_protected", "") else "Token: ainda não configurado."
-        ttk.Label(right, text=token_state, style="Panel.TLabel").pack(anchor="w", pady=(8, 0))
-        internet_panel = ttk.Frame(right, style="Panel.TFrame")
+        ttk.Label(meta_block, text=token_state, style="Panel.TLabel").pack(anchor="w", pady=(8, 0))
+        internet_panel = ttk.Frame(meta_block, style="Panel.TFrame")
         internet_panel.pack(fill="x", pady=(10, 0))
         ttk.Label(internet_panel, textvariable=internet_status, style="Panel.TLabel").pack(side="left")
         ttk.Button(internet_panel, text="Testar internet", command=lambda: self._update_internet_status(internet_status)).pack(side="right")
-        ttk.Label(right, text="Como o app deve enviar", style="Panel.TLabel").pack(anchor="w", pady=(10, 4))
-        ttk.Combobox(right, textvariable=delivery_mode, values=tuple(delivery_modes.keys()), state="readonly").pack(fill="x")
         for label, variable in [
             ("Token da Meta (opcional)", token),
             ("ID do número no WhatsApp Business", phone_number_id),
             ("ID da conta empresarial da Meta", business_account_id),
             ("Webhook", webhook_url),
-            ("Versão da API da Meta", api_version),
-            ("Modelo aprovado padrão", default_template),
-            ("Idioma padrão do modelo", default_language),
         ]:
-            self._entry(right, label, variable, show="*" if label.startswith("Token") else None).pack(fill="x", pady=(10, 0))
-        ttk.Checkbutton(right, text="Modo teste: registrar sem enviar de verdade", variable=dry_run).pack(anchor="w", pady=(12, 0))
+            self._entry(meta_block, label, variable, show="*" if label.startswith("Token") else None).pack(fill="x", pady=(10, 0))
+        combo(meta_block, "Idioma padrão do modelo", default_language, language_values)
+        self._entry(advanced, "Versão da API da Meta", api_version).pack(fill="x", pady=(10, 0))
+        self._entry(advanced, "Modelo aprovado padrão", default_template).pack(fill="x", pady=(10, 0))
 
-        section(right, "Inicialização com Windows")
-        ttk.Label(right, text=startup_status, style="Muted.TLabel", wraplength=500).pack(anchor="w", pady=(4, 0))
-        startup_check = ttk.Checkbutton(right, text="Começar sozinho quando ligar o computador", variable=start_with_windows)
+        startup_block = section(left, "Inicialização")
+        ttk.Label(startup_block, text=startup_status, style="Muted.TLabel", wraplength=500).pack(anchor="w", pady=(4, 0))
+        startup_check = ttk.Checkbutton(startup_block, text="Começar sozinho quando ligar o computador", variable=start_with_windows)
         startup_check.pack(anchor="w", pady=(10, 0))
         if not startup.is_supported():
             startup_check.configure(state="disabled")
 
-        section(right, "Aquecimento dos números")
-        rampup_grid = ttk.Frame(right, style="Panel.TFrame")
+        rampup_block = section(right, "Aquecimento")
+        rampup_grid = ttk.Frame(rampup_block, style="Panel.TFrame")
         rampup_grid.pack(fill="x")
         for index, (label, variable) in enumerate([
             ("Espera mínima entre testes (s)", rampup_min_interval),
@@ -209,9 +286,70 @@ class SettingsScreenMixin:
             rampup_grid.columnconfigure(index % 2, weight=1)
             self._entry(holder, label, variable).pack(fill="x")
 
+        def apply_delay_preset(*_args: object) -> None:
+            preset = delay_preset.get()
+            if preset in DELAY_PRESETS:
+                minimum, maximum, fallback = DELAY_PRESETS[preset]
+                if _args:
+                    smart_min_interval.set(minimum)
+                    smart_max_interval.set(maximum)
+                    interval.set(fallback)
+                delay_notice.set(f"{preset}: {minimum}-{maximum}s entre mensagens.")
+                return
+            delay_notice.set("Personalizado: confira os valores na area avancada antes de salvar.")
+
+        def update_delivery_warning(*_args: object) -> None:
+            mode = delivery_modes.get(delivery_mode.get(), whatsapp.DELIVERY_MODE_OFFICIAL_API)
+            if mode == whatsapp.DELIVERY_MODE_OFFICIAL_API:
+                web_warning.set("Recomendado: usa a API oficial Meta/WhatsApp Business e templates aprovados.")
+            elif mode == whatsapp.DELIVERY_MODE_WHATSAPP_WEB_EXPERIMENTAL:
+                web_warning.set(
+                    "Experimental e nao oficial: usa uma sessao local do WhatsApp Web por QR Code. "
+                    "Use apenas com opt-in, respeitando LGPD e regras do WhatsApp. Pode haver bloqueio ou limitacao da conta."
+                )
+            else:
+                web_warning.set("Manual assistido: gera links e nao envia automaticamente. Use junto do modo teste quando quiser simular.")
+
+        def refresh_web_status() -> None:
+            snapshot = whatsapp.get_whatsapp_web_status()
+            web_status.set(f"WhatsApp Web: {snapshot['label']}. {snapshot['message']}")
+
+        def open_whatsapp_web() -> None:
+            if not self._require_internet():
+                return
+            web_status.set("WhatsApp Web: abrindo navegador local...")
+
+            def worker() -> None:
+                try:
+                    snapshot = whatsapp.open_whatsapp_web_session()
+                except whatsapp.WhatsAppAPIError as exc:
+                    self.after(0, lambda: web_status.set(f"WhatsApp Web: erro. {exc}"))
+                    self.after(0, lambda: messagebox.showerror(APP_TITLE, str(exc)))
+                    return
+                self.after(
+                    0,
+                    lambda: web_status.set(f"WhatsApp Web: {snapshot['label']}. {snapshot['message']}"),
+                )
+
+            threading.Thread(target=worker, daemon=True).start()
+
+        delivery_mode.trace_add("write", update_delivery_warning)
+        delivery_combo.bind("<<ComboboxSelected>>", update_delivery_warning)
+        delay_preset.trace_add("write", apply_delay_preset)
+        delay_combo.bind("<<ComboboxSelected>>", apply_delay_preset)
+        apply_delay_preset()
+        update_delivery_warning()
+        refresh_web_status()
+
         def save() -> None:
             try:
                 parsed_font_size = min(max(self._positive_int(font_size.get(), "Tamanho da fonte", 9), 9), 14)
+                send_interval_value = float(interval.get().replace(",", "."))
+                daily_limit_value = int(float(daily_limit.get().replace(",", ".")))
+                smart_min_value = self._positive_int(smart_min_interval.get(), "Espera minima", 1)
+                smart_max_value = self._positive_int(smart_max_interval.get(), "Espera maxima", 1)
+                if smart_min_value < 10 or smart_max_value < 10:
+                    raise ValueError("Delays muito baixos podem ser bloqueados pelo sistema. Use pelo menos 10 segundos.")
                 config_to_save = whatsapp.WhatsAppConfig(
                     api_version=api_version.get(),
                     phone_number_id=phone_number_id.get(),
@@ -221,9 +359,18 @@ class SettingsScreenMixin:
                     default_language=default_language.get(),
                     delivery_mode=delivery_modes.get(delivery_mode.get(), "official_api"),
                     dry_run=dry_run.get(),
-                    send_interval_seconds=float(interval.get().replace(",", ".")),
-                    daily_send_limit=int(float(daily_limit.get().replace(",", "."))),
+                    send_interval_seconds=send_interval_value,
+                    daily_send_limit=daily_limit_value,
                 )
+                if config_to_save.delivery_mode == whatsapp.DELIVERY_MODE_WHATSAPP_WEB_EXPERIMENTAL:
+                    if not messagebox.askyesno(
+                        APP_TITLE,
+                        "WhatsApp Web Experimental nao e API oficial.\n\n"
+                        "Use apenas com consentimento/opt-in, respeitando LGPD e regras do WhatsApp. "
+                        "A conta pode sofrer bloqueio, limite ou desconexao.\n\n"
+                        "Deseja ativar este modo experimental?",
+                    ):
+                        return
                 if not self._confirm_settings_save():
                     return
                 whatsapp.save_config(config_to_save, token.get().strip() or None)
