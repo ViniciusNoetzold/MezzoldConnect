@@ -152,10 +152,13 @@ def assess_campaign(campaign_id: int) -> dict[str, Any]:
         and (get_setting("whatsapp_token_protected", "") or os.environ.get("MEZZOLD_WHATSAPP_TOKEN", ""))
     )
     dry_run = get_setting("whatsapp_dry_run", "1") == "1"
-    delivery_mode = get_setting("delivery_mode", "official_api")
+    delivery_mode = str(campaign_data.get("delivery_mode") or get_setting("delivery_mode", "official_api"))
     if delivery_mode == "manual_assisted":
         score += 30
         notes.append("Modo sem API oficial: apenas manual assistido por link wa.me, sem envio automático.")
+    elif delivery_mode == "whatsapp_web_experimental":
+        score += 45
+        notes.append("WhatsApp Web Experimental nao e API oficial; ha risco de bloqueio, limite ou desconexao.")
     elif delivery_mode != "official_api":
         score += 45
         notes.append("Modo de envio não reconhecido como Cloud API oficial.")
