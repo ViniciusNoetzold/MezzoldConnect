@@ -53,6 +53,58 @@ CONTACT_FINAL_STATUSES = {
     CONTACT_STATUS_NO_PERMISSION,
     CONTACT_STATUS_MANUAL_PENDING,
 }
+DEFAULT_DELAY_MIN_SECONDS = 30
+DEFAULT_DELAY_MAX_SECONDS = 45
+LOW_DELAY_WARNING_SECONDS = 10
+
+
+def recommended_delay_for_contacts(total_contacts: int) -> tuple[int, int]:
+    total_contacts = max(int(total_contacts or 0), 0)
+    if total_contacts >= 200:
+        return 60, 120
+    if total_contacts >= 50:
+        return 40, 90
+    return DEFAULT_DELAY_MIN_SECONDS, DEFAULT_DELAY_MAX_SECONDS
+
+
+def normalize_campaign_delay(
+    delay_min_seconds: object = None,
+    delay_max_seconds: object = None,
+    total_contacts: int = 0,
+) -> tuple[int, int]:
+    recommended_min, recommended_max = recommended_delay_for_contacts(total_contacts)
+    if delay_min_seconds in (None, ""):
+        delay_min = recommended_min
+    else:
+        try:
+            delay_min = int(float(str(delay_min_seconds).replace(",", ".")))
+        except ValueError as exc:
+            raise CampaignError("Delay mínimo inválido.") from exc
+
+    if delay_max_seconds in (None, ""):
+        delay_max = recommended_max
+    else:
+        try:
+            delay_max = int(float(str(delay_max_seconds).replace(",", ".")))
+        except ValueError as exc:
+            raise CampaignError("Delay máximo inválido.") from exc
+
+    if delay_min < 1:
+        raise CampaignError("O delay mínimo precisa ser de pelo menos 1 segundo.")
+    if delay_max < delay_min:
+        raise CampaignError("O delay máximo precisa ser maior ou igual ao delay mínimo.")
+    return delay_min, delay_max
+
+
+def delay_recommendation_message(delay_min_seconds: object, delay_max_seconds: object) -> tuple[str, str]:
+    delay_min, delay_max = normalize_campaign_delay(delay_min_seconds, delay_max_seconds)
+    if delay_min < LOW_DELAY_WARNING_SECONDS or delay_max < LOW_DELAY_WARNING_SECONDS:
+        return "alto", "Delay muito baixo: risco alto de bloqueio ou falhas."
+    if delay_min < DEFAULT_DELAY_MIN_SECONDS or delay_max < DEFAULT_DELAY_MAX_SECONDS:
+        return "moderado", "Delay médio: use com cuidado em listas maiores."
+    if delay_max > delay_min:
+        return "baixo", "Delay variável e mais alto: risco menor."
+    return "moderado", "Delay fixo: funciona, mas variar o intervalo reduz risco."
 
 
 def create_campaign(
@@ -67,6 +119,8 @@ def create_campaign(
     media_variants: list[str] | None = None,
     scheduled_at: str | None = None,
     folder_name: str = "",
+    delay_min_seconds: object = None,
+    delay_max_seconds: object = None,
 ) -> int:
     name = name.strip()
     message = message.strip()
@@ -78,6 +132,7 @@ def create_campaign(
         raise CampaignError("Escreva a mensagem ou informe o modelo aprovado na Meta.")
     if not contact_ids:
         raise CampaignError("Escolha pelo menos um cliente autorizado.")
+    delay_min, delay_max = normalize_campaign_delay(delay_min_seconds, delay_max_seconds, len(contact_ids))
 
     timestamp = now_text()
     status = CAMPAIGN_STATUS_SCHEDULED if scheduled_at else CAMPAIGN_STATUS_DRAFT
@@ -88,8 +143,9 @@ def create_campaign(
             """
             INSERT INTO campaigns
                 (name, message, media_path, template_name, template_language,
-                 message_category, folder_name, status, scheduled_at, created_at, updated_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                 message_category, folder_name, delay_min_seconds, delay_max_seconds,
+                 status, scheduled_at, created_at, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 name,
@@ -99,6 +155,8 @@ def create_campaign(
                 template_language.strip() or "pt_BR",
                 message_category.strip() or "marketing",
                 folder_name,
+                delay_min,
+                delay_max,
                 status,
                 scheduled_at,
                 timestamp,
@@ -132,7 +190,7 @@ def create_campaign(
     _send_log(
         "CREATE "
         f"campaign_id={campaign_id} status={status} scheduled_at={scheduled_at or '-'} "
-        f"folder={_preview(folder_name)} contacts={len(contact_ids)}"
+        f"folder={_preview(folder_name)} contacts={len(contact_ids)} delay={delay_min}-{delay_max}s"
     )
     return campaign_id
 
@@ -259,7 +317,13 @@ def schedule_campaign(campaign_id: int, scheduled_at: str) -> None:
     _send_log(f"SCHEDULE campaign_id={campaign_id} scheduled_at={scheduled_at.strip()}")
 
 
-def update_campaign_details(campaign_id: int, name: str, scheduled_at: str = "") -> None:
+def update_campaign_details(
+    campaign_id: int,
+    name: str,
+    scheduled_at: str = "",
+    delay_min_seconds: object = None,
+    delay_max_seconds: object = None,
+) -> None:
     campaign = get_campaign(campaign_id)
     if not campaign:
         raise CampaignError("Não encontrei essa campanha.")
@@ -270,6 +334,20 @@ def update_campaign_details(campaign_id: int, name: str, scheduled_at: str = "")
 
     status = str(campaign.get("status") or "")
     new_status = status
+    delay_changed = delay_min_seconds not in (None, "") or delay_max_seconds not in (None, "")
+    if delay_changed:
+        current_min = int(campaign.get("delay_min_seconds") or DEFAULT_DELAY_MIN_SECONDS)
+        current_max = int(campaign.get("delay_max_seconds") or DEFAULT_DELAY_MAX_SECONDS)
+        delay_min, delay_max = normalize_campaign_delay(
+            delay_min_seconds if delay_min_seconds not in (None, "") else current_min,
+            delay_max_seconds if delay_max_seconds not in (None, "") else current_max,
+        )
+        if (delay_min, delay_max) != (current_min, current_max) and status not in {CAMPAIGN_STATUS_DRAFT, CAMPAIGN_STATUS_SCHEDULED}:
+            raise CampaignError("O delay só pode ser alterado antes da campanha iniciar.")
+    else:
+        delay_min = int(campaign.get("delay_min_seconds") or DEFAULT_DELAY_MIN_SECONDS)
+        delay_max = int(campaign.get("delay_max_seconds") or DEFAULT_DELAY_MAX_SECONDS)
+
     if scheduled_at != str(campaign.get("scheduled_at") or ""):
         if status in CAMPAIGN_TERMINAL_STATUSES or status == CAMPAIGN_STATUS_SENDING:
             raise CampaignError(f"Campanha com status '{status}' não pode ter agendamento alterado.")
@@ -282,15 +360,15 @@ def update_campaign_details(campaign_id: int, name: str, scheduled_at: str = "")
         conn.execute(
             """
             UPDATE campaigns
-            SET name = ?, scheduled_at = ?, status = ?, updated_at = ?
+            SET name = ?, scheduled_at = ?, status = ?, delay_min_seconds = ?, delay_max_seconds = ?, updated_at = ?
             WHERE id = ?
             """,
-            (name, scheduled_at or None, new_status, now_text(), campaign_id),
+            (name, scheduled_at or None, new_status, delay_min, delay_max, now_text(), campaign_id),
         )
     _send_log(
         "UPDATE "
         f"campaign_id={campaign_id} status={new_status} scheduled_at={scheduled_at or '-'} "
-        f"name={_preview(name)}"
+        f"name={_preview(name)} delay={delay_min}-{delay_max}s"
     )
 
 
@@ -521,21 +599,27 @@ def _smart_session_deadline() -> datetime | None:
     return datetime.now() + timedelta(minutes=minutes)
 
 
-def _sleep_between_sends(counter: int, total: int, config_interval: float) -> None:
+def _sleep_between_sends(counter: int, total: int, campaign: dict[str, Any], config_interval: float) -> None:
     if counter >= total:
         return
-    if not smart_send_enabled():
-        time.sleep(max(config_interval, 0.5))
-        return
+    try:
+        minimum, maximum = normalize_campaign_delay(
+            campaign.get("delay_min_seconds"),
+            campaign.get("delay_max_seconds"),
+            total,
+        )
+    except CampaignError:
+        minimum = max(int(float(config_interval)), 1)
+        maximum = max(minimum, DEFAULT_DELAY_MAX_SECONDS)
 
-    minimum = _setting_int("smart_min_interval_seconds", 30, 1)
-    maximum = _setting_int("smart_max_interval_seconds", 45, minimum)
-    if maximum < minimum:
-        maximum = minimum
     delay = random.uniform(minimum, maximum)
+    _send_log(
+        f"DELAY campaign_id={campaign.get('id')} next_in={delay:.1f}s "
+        f"range={minimum}-{maximum}s smart={smart_send_enabled()}"
+    )
     time.sleep(delay)
 
-    pause_every = _setting_int("smart_pause_every", 10, 1)
+    pause_every = _setting_int("smart_pause_every", 10, 1) if smart_send_enabled() else 0
     if pause_every and counter % pause_every == 0:
         pause_min = _setting_int("smart_pause_min_seconds", 120, 0)
         pause_max = _setting_int("smart_pause_max_seconds", 300, pause_min)
@@ -766,6 +850,7 @@ def _send_campaign_locked(
         f"campaign_id={campaign_id} campaign={_preview(campaign.get('name'))} runner={runner} "
         f"contacts={total} mode={config.delivery_mode} dry_run={config.dry_run} "
         f"sender_number_id={sender_number} template={_preview(campaign.get('template_name') or config.default_template)} "
+        f"delay={campaign.get('delay_min_seconds') or DEFAULT_DELAY_MIN_SECONDS}-{campaign.get('delay_max_seconds') or DEFAULT_DELAY_MAX_SECONDS}s "
         f"risk={risk['score']}%"
     )
 
@@ -866,7 +951,7 @@ def _send_campaign_locked(
         if progress_callback:
             progress_callback(index, total, message)
 
-        _sleep_between_sends(index, total, config.send_interval_seconds)
+        _sleep_between_sends(index, total, campaign, config.send_interval_seconds)
 
     final_status = _final_status_for_campaign(campaign_id, bool(stop_event and stop_event.is_set()))
     current = get_campaign(campaign_id)
