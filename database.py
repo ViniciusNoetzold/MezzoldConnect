@@ -11,6 +11,7 @@ from typing import Any, Iterable
 
 APP_TITLE = "Mezzold Connect"
 APP_VERSION = "1.0.0"
+APP_DOWNLOAD_URL = "https://github.com/ViniciusNoetzold/MezzoldConnect/releases"
 DEFAULT_CONTACT_FOLDER = "Importados"
 
 if getattr(sys, "frozen", False):
@@ -300,6 +301,9 @@ def initialize_database() -> None:
             "app_theme": "light",
             "ui_font_size": "10",
             "ui_density": "normal",
+            "app_update_manifest_url": "",
+            "app_update_download_url": APP_DOWNLOAD_URL,
+            "app_update_channel": "stable",
         }
         for key, value in defaults.items():
             conn.execute(
@@ -309,6 +313,17 @@ def initialize_database() -> None:
                 """,
                 (key, value, now_text()),
             )
+
+        conn.execute(
+            """
+            INSERT INTO settings (key, value, updated_at)
+            VALUES ('app_current_version', ?, ?)
+            ON CONFLICT(key) DO UPDATE SET
+                value = excluded.value,
+                updated_at = excluded.updated_at
+            """,
+            (APP_VERSION, now_text()),
+        )
 
         conn.execute(
             """
