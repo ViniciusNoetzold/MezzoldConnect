@@ -12,7 +12,15 @@ from typing import Any, Callable
 import compliance
 from database import DATA_DIR, connect, now_text, row_to_dict, rows_to_dicts
 from database import get_setting
-from whatsapp import WhatsAppAPIError, WhatsAppBusinessClient, load_config
+from whatsapp import (
+    DELIVERY_MODE_OFFICIAL_API,
+    DELIVERY_MODE_WHATSAPP_WEB_EXPERIMENTAL,
+    WhatsAppAPIError,
+    WhatsAppBusinessClient,
+    WhatsAppWebSessionError,
+    load_config,
+    normalize_delivery_mode,
+)
 
 
 class CampaignError(ValueError):
@@ -56,6 +64,14 @@ CONTACT_FINAL_STATUSES = {
 DEFAULT_DELAY_MIN_SECONDS = 30
 DEFAULT_DELAY_MAX_SECONDS = 45
 LOW_DELAY_WARNING_SECONDS = 10
+WEB_EXPERIMENTAL_MIN_DELAY_SECONDS = 10
+
+
+def _normalize_delivery_mode_for_campaign(value: object) -> str:
+    try:
+        return normalize_delivery_mode(value)
+    except WhatsAppAPIError as exc:
+        raise CampaignError(str(exc)) from exc
 
 
 def recommended_delay_for_contacts(total_contacts: int) -> tuple[int, int]:
@@ -121,6 +137,7 @@ def create_campaign(
     folder_name: str = "",
     delay_min_seconds: object = None,
     delay_max_seconds: object = None,
+    delivery_mode: str | None = None,
 ) -> int:
     name = name.strip()
     message = message.strip()
@@ -133,6 +150,9 @@ def create_campaign(
     if not contact_ids:
         raise CampaignError("Escolha pelo menos um cliente autorizado.")
     delay_min, delay_max = normalize_campaign_delay(delay_min_seconds, delay_max_seconds, len(contact_ids))
+    selected_delivery_mode = _normalize_delivery_mode_for_campaign(
+        delivery_mode or get_setting("delivery_mode", DELIVERY_MODE_OFFICIAL_API)
+    )
 
     timestamp = now_text()
     status = CAMPAIGN_STATUS_SCHEDULED if scheduled_at else CAMPAIGN_STATUS_DRAFT
@@ -144,8 +164,8 @@ def create_campaign(
             INSERT INTO campaigns
                 (name, message, media_path, template_name, template_language,
                  message_category, folder_name, delay_min_seconds, delay_max_seconds,
-                 status, scheduled_at, created_at, updated_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                 delivery_mode, status, scheduled_at, created_at, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 name,
@@ -157,6 +177,7 @@ def create_campaign(
                 folder_name,
                 delay_min,
                 delay_max,
+                selected_delivery_mode,
                 status,
                 scheduled_at,
                 timestamp,
@@ -190,7 +211,8 @@ def create_campaign(
     _send_log(
         "CREATE "
         f"campaign_id={campaign_id} status={status} scheduled_at={scheduled_at or '-'} "
-        f"folder={_preview(folder_name)} contacts={len(contact_ids)} delay={delay_min}-{delay_max}s"
+        f"folder={_preview(folder_name)} contacts={len(contact_ids)} delay={delay_min}-{delay_max}s "
+        f"mode={selected_delivery_mode}"
     )
     return campaign_id
 
@@ -323,6 +345,7 @@ def update_campaign_details(
     scheduled_at: str = "",
     delay_min_seconds: object = None,
     delay_max_seconds: object = None,
+    delivery_mode: str | None = None,
 ) -> None:
     campaign = get_campaign(campaign_id)
     if not campaign:
@@ -356,19 +379,27 @@ def update_campaign_details(
         elif status == CAMPAIGN_STATUS_SCHEDULED:
             new_status = CAMPAIGN_STATUS_DRAFT
 
+    current_delivery_mode = _normalize_delivery_mode_for_campaign(campaign.get("delivery_mode") or DELIVERY_MODE_OFFICIAL_API)
+    selected_delivery_mode = current_delivery_mode
+    if delivery_mode not in (None, ""):
+        selected_delivery_mode = _normalize_delivery_mode_for_campaign(delivery_mode)
+        if selected_delivery_mode != current_delivery_mode and status not in {CAMPAIGN_STATUS_DRAFT, CAMPAIGN_STATUS_SCHEDULED}:
+            raise CampaignError("O modo de envio so pode ser alterado antes da campanha iniciar.")
+
     with connect() as conn:
         conn.execute(
             """
             UPDATE campaigns
-            SET name = ?, scheduled_at = ?, status = ?, delay_min_seconds = ?, delay_max_seconds = ?, updated_at = ?
+            SET name = ?, scheduled_at = ?, status = ?, delay_min_seconds = ?, delay_max_seconds = ?,
+                delivery_mode = ?, updated_at = ?
             WHERE id = ?
             """,
-            (name, scheduled_at or None, new_status, delay_min, delay_max, now_text(), campaign_id),
+            (name, scheduled_at or None, new_status, delay_min, delay_max, selected_delivery_mode, now_text(), campaign_id),
         )
     _send_log(
         "UPDATE "
         f"campaign_id={campaign_id} status={new_status} scheduled_at={scheduled_at or '-'} "
-        f"name={_preview(name)} delay={delay_min}-{delay_max}s"
+        f"name={_preview(name)} delay={delay_min}-{delay_max}s mode={selected_delivery_mode}"
     )
 
 
@@ -531,6 +562,7 @@ def log_message(
     error_message: str = "",
     provider_message_id: str = "",
     action_url: str = "",
+    delivery_mode: str = DELIVERY_MODE_OFFICIAL_API,
     message_body: str = "",
     media_path: str = "",
 ) -> None:
@@ -539,8 +571,9 @@ def log_message(
             """
             INSERT INTO message_logs
                 (campaign_id, contact_id, phone, recipient_name, status,
-                 error_message, provider_message_id, action_url, message_body, media_path, created_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                 error_message, provider_message_id, action_url, delivery_mode,
+                 message_body, media_path, created_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 campaign_id,
@@ -551,6 +584,7 @@ def log_message(
                 error_message,
                 provider_message_id,
                 action_url,
+                normalize_delivery_mode(delivery_mode),
                 message_body,
                 media_path,
                 now_text(),
@@ -775,6 +809,30 @@ def _final_status_for_campaign(campaign_id: int, stopped: bool) -> str:
     return CAMPAIGN_STATUS_DONE
 
 
+def _validate_whatsapp_web_campaign(
+    campaign: dict[str, Any],
+    dry_run: bool,
+    explicit_user_confirmation: bool,
+) -> None:
+    if dry_run:
+        return
+    if not explicit_user_confirmation:
+        raise CampaignError(
+            "Envio real via WhatsApp Web Experimental exige confirmacao explicita do usuario."
+        )
+    minimum = int(campaign.get("delay_min_seconds") or DEFAULT_DELAY_MIN_SECONDS)
+    maximum = int(campaign.get("delay_max_seconds") or DEFAULT_DELAY_MAX_SECONDS)
+    if minimum < WEB_EXPERIMENTAL_MIN_DELAY_SECONDS or maximum < WEB_EXPERIMENTAL_MIN_DELAY_SECONDS:
+        raise CampaignError(
+            f"WhatsApp Web Experimental bloqueado: use delay minimo e maximo de pelo menos "
+            f"{WEB_EXPERIMENTAL_MIN_DELAY_SECONDS}s."
+        )
+    if maximum <= minimum:
+        raise CampaignError(
+            "WhatsApp Web Experimental exige delay variavel. Configure maximo maior que o minimo."
+        )
+
+
 def send_campaign(
     campaign_id: int,
     client: WhatsAppBusinessClient | None = None,
@@ -782,6 +840,7 @@ def send_campaign(
     stop_event: Event | None = None,
     runner: str = "desktop",
     allow_resume: bool = False,
+    explicit_user_confirmation: bool = False,
 ) -> dict[str, int]:
     lock_owner = _acquire_campaign_lock(campaign_id, runner, allow_resume)
     try:
@@ -791,6 +850,7 @@ def send_campaign(
             progress_callback=progress_callback,
             stop_event=stop_event,
             runner=runner,
+            explicit_user_confirmation=explicit_user_confirmation,
         )
     except Exception as exc:
         _send_log(f"ABORT campaign_id={campaign_id} owner={lock_owner} error={_preview(exc)}")
@@ -809,6 +869,7 @@ def _send_campaign_locked(
     progress_callback: ProgressCallback | None = None,
     stop_event: Event | None = None,
     runner: str = "desktop",
+    explicit_user_confirmation: bool = False,
 ) -> dict[str, int]:
     campaign = get_campaign(campaign_id)
     if not campaign:
@@ -824,6 +885,12 @@ def _send_campaign_locked(
         )
 
     config = load_config()
+    delivery_mode = _normalize_delivery_mode_for_campaign(
+        campaign.get("delivery_mode") or config.delivery_mode or DELIVERY_MODE_OFFICIAL_API
+    )
+    campaign["delivery_mode"] = delivery_mode
+    if delivery_mode == DELIVERY_MODE_WHATSAPP_WEB_EXPERIMENTAL:
+        _validate_whatsapp_web_campaign(campaign, config.dry_run, explicit_user_confirmation)
     client = client or WhatsAppBusinessClient(config)
     contacts = get_campaign_contacts(campaign_id)
     if not contacts:
@@ -848,7 +915,7 @@ def _send_campaign_locked(
     _send_log(
         "START "
         f"campaign_id={campaign_id} campaign={_preview(campaign.get('name'))} runner={runner} "
-        f"contacts={total} mode={config.delivery_mode} dry_run={config.dry_run} "
+        f"contacts={total} mode={delivery_mode} dry_run={config.dry_run} "
         f"sender_number_id={sender_number} template={_preview(campaign.get('template_name') or config.default_template)} "
         f"delay={campaign.get('delay_min_seconds') or DEFAULT_DELAY_MIN_SECONDS}-{campaign.get('delay_max_seconds') or DEFAULT_DELAY_MAX_SECONDS}s "
         f"risk={risk['score']}%"
@@ -873,14 +940,14 @@ def _send_campaign_locked(
 
         if int(contact.get("blacklisted") or 0):
             _update_campaign_contact(campaign_id, contact_id, "bloqueado", "Contato na blacklist.")
-            log_message(campaign_id, contact_id, phone, name, "bloqueado", "Contato na blacklist.")
+            log_message(campaign_id, contact_id, phone, name, "bloqueado", "Contato na blacklist.", delivery_mode=delivery_mode)
             totals["bloqueado"] += 1
             _send_log(f"SKIP campaign_id={campaign_id} contact_id={contact_id} phone={phone} reason=blacklisted")
             continue
 
         if not int(contact.get("opt_in") or 0):
             _update_campaign_contact(campaign_id, contact_id, "sem_autorizacao", "Contato sem opt-in.")
-            log_message(campaign_id, contact_id, phone, name, "sem_autorizacao", "Contato sem opt-in.")
+            log_message(campaign_id, contact_id, phone, name, "sem_autorizacao", "Contato sem opt-in.", delivery_mode=delivery_mode)
             totals["sem_autorizacao"] += 1
             _send_log(f"SKIP campaign_id={campaign_id} contact_id={contact_id} phone={phone} reason=no_opt_in")
             continue
@@ -906,11 +973,13 @@ def _send_campaign_locked(
             campaign_for_send = dict(campaign)
             campaign_for_send["message"] = str(variant.get("body") or campaign["message"])
             campaign_for_send["media_path"] = str(variant.get("media_path") or campaign["media_path"] or "")
+            campaign_for_send["delivery_mode"] = delivery_mode
+            campaign_for_send["explicit_user_confirmation"] = explicit_user_confirmation
             _send_log(
                 "CONTACT "
                 f"campaign_id={campaign_id} index={index}/{total} contact_id={contact_id} "
                 f"name={_preview(name, 120)} phone={phone} sender_number_id={sender_number} "
-                f"mode={config.delivery_mode} dry_run={config.dry_run} "
+                f"mode={delivery_mode} dry_run={config.dry_run} "
                 f"message={_preview(campaign_for_send['message'])}"
             )
             result = client.send_campaign_message(contact, campaign_for_send)
@@ -925,6 +994,7 @@ def _send_campaign_locked(
                 status,
                 provider_message_id=result.provider_message_id,
                 action_url=result.action_url,
+                delivery_mode=result.delivery_mode or delivery_mode,
                 message_body=campaign_for_send["message"],
                 media_path=campaign_for_send["media_path"],
             )
@@ -932,7 +1002,7 @@ def _send_campaign_locked(
             _send_log(
                 "SUCCESS "
                 f"campaign_id={campaign_id} contact_id={contact_id} phone={phone} "
-                f"status={status} contact_status={contact_status} mode={result.delivery_mode or config.delivery_mode} "
+                f"status={status} contact_status={contact_status} mode={result.delivery_mode or delivery_mode} "
                 f"provider_message_id={result.provider_message_id or '-'} "
                 f"manual_link={'yes' if result.action_url else 'no'}"
             )
@@ -940,13 +1010,19 @@ def _send_campaign_locked(
         except (WhatsAppAPIError, OSError, ValueError) as exc:
             error = str(exc)
             _update_campaign_contact(campaign_id, contact_id, "falhou", error)
-            log_message(campaign_id, contact_id, phone, name, "falhou", error)
+            log_message(campaign_id, contact_id, phone, name, "falhou", error, delivery_mode=delivery_mode)
             totals["falhou"] += 1
             _send_log(
                 f"ERROR campaign_id={campaign_id} contact_id={contact_id} phone={phone} "
-                f"mode={config.delivery_mode} error={_preview(error)}"
+                f"mode={delivery_mode} error={_preview(error)}"
             )
             message = f"{name}: falhou - {error}"
+            if isinstance(exc, WhatsAppWebSessionError):
+                _set_campaign_status(campaign_id, CAMPAIGN_STATUS_PAUSED)
+                _send_log(f"PAUSE campaign_id={campaign_id} reason=whatsapp_web_session_error")
+                if progress_callback:
+                    progress_callback(index, total, message)
+                break
 
         if progress_callback:
             progress_callback(index, total, message)

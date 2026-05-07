@@ -3,6 +3,7 @@ from __future__ import annotations
 import base64
 import json
 import os
+import random
 import time
 import urllib.error
 import urllib.parse
@@ -13,7 +14,7 @@ from pathlib import Path
 from typing import Any
 
 from contacts import normalize_phone
-from database import get_setting, set_settings
+from database import DATA_DIR, get_setting, set_settings
 
 
 class WhatsAppAPIError(RuntimeError):
@@ -45,7 +46,61 @@ class SendResult:
     delivery_mode: str = ""
 
 
-VALID_DELIVERY_MODES = {"official_api", "manual_assisted"}
+DELIVERY_MODE_OFFICIAL_API = "official_api"
+DELIVERY_MODE_WHATSAPP_WEB_EXPERIMENTAL = "whatsapp_web_experimental"
+DELIVERY_MODE_MANUAL_ASSISTED = "manual_assisted"
+
+VALID_DELIVERY_MODES = {
+    DELIVERY_MODE_OFFICIAL_API,
+    DELIVERY_MODE_WHATSAPP_WEB_EXPERIMENTAL,
+    DELIVERY_MODE_MANUAL_ASSISTED,
+}
+
+DELIVERY_MODE_LABELS = {
+    DELIVERY_MODE_OFFICIAL_API: "API Oficial Meta/WhatsApp Business (recomendado)",
+    DELIVERY_MODE_WHATSAPP_WEB_EXPERIMENTAL: "WhatsApp Web Experimental via QR Code (nao oficial)",
+    DELIVERY_MODE_MANUAL_ASSISTED: "Manual assistido por link (legado)",
+}
+
+WEB_STATUS_NOT_CONNECTED = "not_connected"
+WEB_STATUS_WAITING_QR = "waiting_qr"
+WEB_STATUS_CONNECTED = "connected"
+WEB_STATUS_ERROR = "error"
+WEB_STATUS_DISCONNECTED = "disconnected"
+
+WEB_STATUS_LABELS = {
+    WEB_STATUS_NOT_CONNECTED: "nao conectado",
+    WEB_STATUS_WAITING_QR: "aguardando QR Code",
+    WEB_STATUS_CONNECTED: "conectado",
+    WEB_STATUS_ERROR: "erro",
+    WEB_STATUS_DISCONNECTED: "desconectado",
+}
+
+WEB_PROFILE_DIR = DATA_DIR / "whatsapp_web_experimental_profile"
+
+
+class WhatsAppWebSessionError(WhatsAppAPIError):
+    pass
+
+
+def normalize_delivery_mode(value: object) -> str:
+    mode = str(value or DELIVERY_MODE_OFFICIAL_API).strip() or DELIVERY_MODE_OFFICIAL_API
+    if mode not in VALID_DELIVERY_MODES:
+        raise WhatsAppAPIError(f"Modo de envio desconhecido: {mode}.")
+    return mode
+
+
+def delivery_mode_label(value: object) -> str:
+    try:
+        mode = normalize_delivery_mode(value)
+    except WhatsAppAPIError:
+        return str(value or "")
+    return DELIVERY_MODE_LABELS.get(mode, mode)
+
+
+def web_connection_status_label(value: object) -> str:
+    status = str(value or WEB_STATUS_NOT_CONNECTED)
+    return WEB_STATUS_LABELS.get(status, status)
 
 
 def _dpapi_blob(data: bytes):
@@ -131,7 +186,7 @@ def load_config() -> WhatsAppConfig:
         webhook_url=get_setting("whatsapp_webhook_url", "").strip(),
         default_template=get_setting("whatsapp_default_template", "").strip(),
         default_language=get_setting("whatsapp_default_language", "pt_BR").strip() or "pt_BR",
-        delivery_mode=get_setting("delivery_mode", "official_api").strip() or "official_api",
+        delivery_mode=normalize_delivery_mode(get_setting("delivery_mode", DELIVERY_MODE_OFFICIAL_API)),
         dry_run=get_setting("whatsapp_dry_run", "1") == "1",
         send_interval_seconds=float(get_setting("send_interval_seconds", "2") or 2),
         daily_send_limit=int(float(get_setting("daily_send_limit", "500") or 500)),
@@ -146,7 +201,7 @@ def save_config(config: WhatsAppConfig, token_to_save: str | None = None) -> Non
         "whatsapp_webhook_url": config.webhook_url.strip(),
         "whatsapp_default_template": config.default_template.strip(),
         "whatsapp_default_language": config.default_language.strip() or "pt_BR",
-        "delivery_mode": config.delivery_mode.strip() or "official_api",
+        "delivery_mode": normalize_delivery_mode(config.delivery_mode),
         "whatsapp_dry_run": "1" if config.dry_run else "0",
         "send_interval_seconds": str(max(config.send_interval_seconds, 0.5)),
         "daily_send_limit": str(max(config.daily_send_limit, 1)),
@@ -185,10 +240,7 @@ class WhatsAppBusinessClient:
         message = str(campaign.get("message") or "")
         media_path = str(campaign.get("media_path") or "")
         category = str(campaign.get("message_category") or "marketing")
-        delivery_mode = self.config.delivery_mode.strip() or "official_api"
-
-        if delivery_mode not in VALID_DELIVERY_MODES:
-            raise WhatsAppAPIError(f"Modo de envio desconhecido: {delivery_mode}.")
+        delivery_mode = normalize_delivery_mode(campaign.get("delivery_mode") or self.config.delivery_mode)
 
         if self.config.dry_run:
             return SendResult(
@@ -198,12 +250,19 @@ class WhatsAppBusinessClient:
                 delivery_mode=delivery_mode,
             )
 
-        if delivery_mode == "manual_assisted":
+        if delivery_mode == DELIVERY_MODE_MANUAL_ASSISTED:
             return SendResult(
                 status="pendente_manual",
                 action_url=build_click_to_chat_link(phone, message),
                 delivery_mode=delivery_mode,
             )
+
+        if delivery_mode == DELIVERY_MODE_WHATSAPP_WEB_EXPERIMENTAL:
+            if not bool(campaign.get("explicit_user_confirmation")):
+                raise WhatsAppAPIError(
+                    "Envio real via WhatsApp Web Experimental exige confirmacao explicita do usuario."
+                )
+            return get_whatsapp_web_provider(self.config).send_campaign_message(contact, campaign)
 
         if not self.is_configured:
             raise WhatsAppAPIError("Preencha o token e o ID do número do WhatsApp Business.")
@@ -263,7 +322,11 @@ class WhatsAppBusinessClient:
         messages = response.get("messages") if isinstance(response, dict) else None
         if isinstance(messages, list) and messages:
             provider_id = str(messages[0].get("id", ""))
-        return SendResult(status="enviado", provider_message_id=provider_id, delivery_mode="official_api")
+        return SendResult(
+            status="enviado",
+            provider_message_id=provider_id,
+            delivery_mode=DELIVERY_MODE_OFFICIAL_API,
+        )
 
     def send_text_message(self, to: str, body: str, preview_url: bool = False) -> SendResult:
         if not body.strip():
@@ -287,7 +350,11 @@ class WhatsAppBusinessClient:
         messages = response.get("messages") if isinstance(response, dict) else None
         if isinstance(messages, list) and messages:
             provider_id = str(messages[0].get("id", ""))
-        return SendResult(status="enviado", provider_message_id=provider_id, delivery_mode="official_api")
+        return SendResult(
+            status="enviado",
+            provider_message_id=provider_id,
+            delivery_mode=DELIVERY_MODE_OFFICIAL_API,
+        )
 
     def _post_json(self, url: str, payload: dict[str, Any]) -> dict[str, Any]:
         request = urllib.request.Request(
@@ -312,6 +379,227 @@ class WhatsAppBusinessClient:
             return json.loads(body)
         except json.JSONDecodeError as exc:
             raise WhatsAppAPIError("A Meta retornou uma resposta que o app não conseguiu entender.") from exc
+
+
+class WhatsAppWebExperimentalProvider:
+    def __init__(self, config: WhatsAppConfig | None = None):
+        self.config = config or load_config()
+        self._driver: Any | None = None
+        self._status = WEB_STATUS_NOT_CONNECTED
+        self._message = "Sessao local ainda nao aberta."
+
+    def status_snapshot(self, refresh: bool = True) -> dict[str, str]:
+        if refresh:
+            self.refresh_status()
+        return {
+            "status": self._status,
+            "label": web_connection_status_label(self._status),
+            "message": self._message,
+            "profile_dir": str(WEB_PROFILE_DIR),
+        }
+
+    def open_session(self) -> dict[str, str]:
+        driver = self._ensure_driver()
+        try:
+            driver.get("https://web.whatsapp.com/")
+            self._wait_for_login_or_qr(driver)
+            self.refresh_status()
+            return self.status_snapshot(refresh=False)
+        except WhatsAppWebSessionError:
+            raise
+        except Exception as exc:
+            self._set_status(WEB_STATUS_ERROR, f"Erro ao abrir WhatsApp Web: {exc}")
+            raise WhatsAppWebSessionError(self._message) from exc
+
+    def refresh_status(self) -> None:
+        if self._driver is None:
+            self._set_status(WEB_STATUS_NOT_CONNECTED, "Sessao local ainda nao aberta.")
+            return
+        try:
+            status, message = self._page_state(self._driver)
+            self._set_status(status, message)
+        except Exception as exc:
+            self._driver = None
+            self._set_status(WEB_STATUS_DISCONNECTED, f"Navegador desconectado: {exc}")
+
+    def send_campaign_message(self, contact: dict[str, Any], campaign: dict[str, Any]) -> SendResult:
+        phone = normalize_phone(str(contact["phone"]))
+        message = str(campaign.get("message") or "").strip()
+        media_path = str(campaign.get("media_path") or "").strip()
+        if not message:
+            raise WhatsAppAPIError("A mensagem esta vazia.")
+        if media_path:
+            raise WhatsAppAPIError(
+                "O modo WhatsApp Web Experimental envia apenas texto nesta versao. "
+                "Use a API oficial para midias ou documentos."
+            )
+
+        driver = self._ensure_connected_driver()
+        url = f"https://web.whatsapp.com/send?phone={phone}&text={urllib.parse.quote(message)}&app_absent=0"
+        try:
+            driver.get(url)
+            button = self._wait_for_send_button(driver)
+            time.sleep(random.uniform(1.5, 3.5))
+            button.click()
+            time.sleep(random.uniform(0.8, 1.8))
+        except WhatsAppWebSessionError:
+            raise
+        except Exception as exc:
+            status, _message = self._safe_page_state(driver)
+            if status != WEB_STATUS_CONNECTED:
+                self._set_status(status, "Sessao do WhatsApp Web indisponivel durante o envio.")
+                raise WhatsAppWebSessionError(self._message) from exc
+            raise WhatsAppAPIError(f"Nao consegui enviar pelo WhatsApp Web: {exc}") from exc
+
+        return SendResult(
+            status="enviado",
+            provider_message_id=f"web-{int(time.time() * 1000)}",
+            delivery_mode=DELIVERY_MODE_WHATSAPP_WEB_EXPERIMENTAL,
+        )
+
+    def _ensure_driver(self) -> Any:
+        if self._driver is not None:
+            return self._driver
+        try:
+            from selenium import webdriver
+            from selenium.common.exceptions import WebDriverException
+        except ImportError as exc:
+            self._set_status(WEB_STATUS_ERROR, "Instale a biblioteca opcional selenium para usar o WhatsApp Web.")
+            raise WhatsAppWebSessionError(
+                "Biblioteca selenium nao encontrada. Instale com: py -m pip install selenium"
+            ) from exc
+
+        WEB_PROFILE_DIR.mkdir(parents=True, exist_ok=True)
+        chrome_options = webdriver.ChromeOptions()
+        chrome_options.add_argument(f"--user-data-dir={WEB_PROFILE_DIR}")
+        chrome_options.add_argument("--profile-directory=Default")
+        chrome_options.add_argument("--start-maximized")
+        try:
+            self._driver = webdriver.Chrome(options=chrome_options)
+        except WebDriverException:
+            edge_options = webdriver.EdgeOptions()
+            edge_options.add_argument(f"--user-data-dir={WEB_PROFILE_DIR}")
+            edge_options.add_argument("--profile-directory=Default")
+            edge_options.add_argument("--start-maximized")
+            self._driver = webdriver.Edge(options=edge_options)
+        self._set_status(WEB_STATUS_WAITING_QR, "Navegador aberto. Leia o QR Code se ele aparecer.")
+        return self._driver
+
+    def _ensure_connected_driver(self) -> Any:
+        driver = self._ensure_driver()
+        if not str(getattr(driver, "current_url", "")).startswith("https://web.whatsapp.com"):
+            driver.get("https://web.whatsapp.com/")
+        self._wait_until_connected(driver)
+        return driver
+
+    def _wait_for_login_or_qr(self, driver: Any) -> None:
+        try:
+            from selenium.webdriver.support.ui import WebDriverWait
+        except ImportError as exc:
+            raise WhatsAppWebSessionError("Biblioteca selenium incompleta.") from exc
+
+        WebDriverWait(driver, 45).until(
+            lambda current_driver: self._page_state(current_driver)[0]
+            in {WEB_STATUS_WAITING_QR, WEB_STATUS_CONNECTED}
+        )
+
+    def _wait_until_connected(self, driver: Any) -> None:
+        try:
+            from selenium.common.exceptions import TimeoutException
+            from selenium.webdriver.support.ui import WebDriverWait
+        except ImportError as exc:
+            raise WhatsAppWebSessionError("Biblioteca selenium incompleta.") from exc
+
+        try:
+            WebDriverWait(driver, 60).until(
+                lambda current_driver: self._page_state(current_driver)[0] == WEB_STATUS_CONNECTED
+            )
+        except TimeoutException as exc:
+            status, message = self._safe_page_state(driver)
+            self._set_status(status, message)
+            raise WhatsAppWebSessionError(
+                "WhatsApp Web nao esta conectado. Abra Configuracoes, conecte pelo QR Code e tente novamente."
+            ) from exc
+
+    def _wait_for_send_button(self, driver: Any) -> Any:
+        try:
+            from selenium.common.exceptions import TimeoutException
+            from selenium.webdriver.common.by import By
+            from selenium.webdriver.support.ui import WebDriverWait
+        except ImportError as exc:
+            raise WhatsAppWebSessionError("Biblioteca selenium incompleta.") from exc
+
+        selectors = [
+            (By.CSS_SELECTOR, "button[aria-label='Send']"),
+            (By.CSS_SELECTOR, "button[aria-label='Enviar']"),
+            (By.XPATH, "//span[@data-icon='send']/ancestor::button"),
+        ]
+
+        def find_button(current_driver: Any) -> Any:
+            status, _message = self._page_state(current_driver)
+            if status != WEB_STATUS_CONNECTED:
+                raise WhatsAppWebSessionError("WhatsApp Web saiu do estado conectado.")
+            for by, selector in selectors:
+                for element in current_driver.find_elements(by, selector):
+                    if element.is_displayed() and element.is_enabled():
+                        return element
+            return False
+
+        try:
+            return WebDriverWait(driver, 45).until(find_button)
+        except TimeoutException as exc:
+            status, _message = self._safe_page_state(driver)
+            if status != WEB_STATUS_CONNECTED:
+                raise WhatsAppWebSessionError("WhatsApp Web desconectou antes do envio.") from exc
+            raise WhatsAppAPIError(
+                "Nao encontrei o botao de enviar no WhatsApp Web. Confira o numero e a conversa aberta."
+            ) from exc
+
+    def _page_state(self, driver: Any) -> tuple[str, str]:
+        from selenium.webdriver.common.by import By
+
+        if driver.find_elements(By.CSS_SELECTOR, "#pane-side"):
+            return WEB_STATUS_CONNECTED, "WhatsApp Web conectado neste computador."
+        if driver.find_elements(By.CSS_SELECTOR, "canvas"):
+            return WEB_STATUS_WAITING_QR, "Aguardando leitura do QR Code no WhatsApp Web."
+        body_text = ""
+        try:
+            body_text = driver.find_element(By.TAG_NAME, "body").text.lower()
+        except Exception:
+            body_text = ""
+        if "qr" in body_text or "code" in body_text or "codigo" in body_text:
+            return WEB_STATUS_WAITING_QR, "Aguardando leitura do QR Code no WhatsApp Web."
+        return WEB_STATUS_NOT_CONNECTED, "WhatsApp Web ainda nao confirmou a sessao."
+
+    def _safe_page_state(self, driver: Any) -> tuple[str, str]:
+        try:
+            return self._page_state(driver)
+        except Exception as exc:
+            return WEB_STATUS_DISCONNECTED, f"Navegador desconectado: {exc}"
+
+    def _set_status(self, status: str, message: str) -> None:
+        self._status = status
+        self._message = message
+
+
+_WEB_PROVIDER: WhatsAppWebExperimentalProvider | None = None
+
+
+def get_whatsapp_web_provider(config: WhatsAppConfig | None = None) -> WhatsAppWebExperimentalProvider:
+    global _WEB_PROVIDER
+    if _WEB_PROVIDER is None:
+        _WEB_PROVIDER = WhatsAppWebExperimentalProvider(config or load_config())
+    elif config is not None:
+        _WEB_PROVIDER.config = config
+    return _WEB_PROVIDER
+
+
+def open_whatsapp_web_session() -> dict[str, str]:
+    return get_whatsapp_web_provider().open_session()
+
+
+def get_whatsapp_web_status() -> dict[str, str]:
+    return get_whatsapp_web_provider().status_snapshot()
 
 
 def _format_meta_error(status_code: int, body: str) -> str:
