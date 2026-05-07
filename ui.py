@@ -26,7 +26,7 @@ META_CLOUD_API_URL = "https://meta-preview.mintlify.io/docs/whatsapp/cloud-api/o
 STATUS_LABELS = {
     "rascunho": "Rascunho",
     "agendada": "Agendada",
-    "enviando": "Enviando",
+    "enviando": "Em andamento",
     "concluída": "Concluída",
     "concluida": "Concluída",
     "pausada": "Pausada",
@@ -35,6 +35,7 @@ STATUS_LABELS = {
     "simulado": "Teste",
     "pendente_manual": "Aguardando envio manual",
     "aguardando_manual": "Aguardando envio manual",
+    "erro": "Erro",
     "falhou": "Erro",
     "bloqueado": "Bloqueado",
     "sem_autorizacao": "Sem autorização",
@@ -1143,6 +1144,8 @@ class MezzoldApp(tk.Tk):
         }
         message_category = tk.StringVar(value="Marketing")
         media_path = tk.StringVar()
+        start_mode = tk.StringVar(value="now")
+        start_at = tk.StringVar(value=datetime.now().strftime("%Y-%m-%d %H:%M"))
 
         self._entry(form, "Nome para identificar esta campanha", name).pack(fill="x", pady=(0, 10))
         category_frame = ttk.Frame(form, style="Panel.TFrame")
@@ -1180,6 +1183,15 @@ class MezzoldApp(tk.Tk):
         media_variants = tk.Text(form, height=3, wrap="word")
         media_variants.pack(fill="x", pady=(4, 10))
 
+        send_mode = ttk.Frame(form, style="Panel.TFrame")
+        send_mode.pack(fill="x", pady=(0, 12))
+        ttk.Label(send_mode, text="Quando enviar", style="Panel.TLabel").pack(anchor="w", pady=(0, 4))
+        ttk.Radiobutton(send_mode, text="Iniciar campanha agora", variable=start_mode, value="now").pack(anchor="w")
+        schedule_row = ttk.Frame(send_mode, style="Panel.TFrame")
+        schedule_row.pack(fill="x", pady=(6, 0))
+        ttk.Radiobutton(schedule_row, text="Agendar para", variable=start_mode, value="schedule").pack(side="left")
+        ttk.Entry(schedule_row, textvariable=start_at, width=22).pack(side="left", padx=(8, 0))
+
         folder_panel = ttk.Frame(frame, style="Panel.TFrame", padding=16)
         folder_panel.pack(side="right", fill="y", padx=(16, 0))
         ttk.Label(folder_panel, text="Pasta de contatos", style="Panel.TLabel", font=("Segoe UI Semibold", 11)).pack(anchor="w")
@@ -1197,7 +1209,7 @@ class MezzoldApp(tk.Tk):
         import_button = ttk.Button(folder_actions, text="Importar contatos")
         import_button.pack(side="left", padx=(8, 0))
 
-        save_button = ttk.Button(folder_panel, text="Salvar campanha", style="Accent.TButton")
+        save_button = ttk.Button(folder_panel, text="Criar campanha", style="Accent.TButton")
         save_button.pack(fill="x", pady=(10, 0))
 
         def folder_values() -> list[str]:
@@ -1268,6 +1280,13 @@ class MezzoldApp(tk.Tk):
             if not selected:
                 messagebox.showerror(APP_TITLE, "A pasta selecionada nao tem contatos com opt-in liberados.")
                 return
+            scheduled_value = ""
+            if start_mode.get() == "schedule":
+                try:
+                    scheduled_value = parse_datetime(start_at.get())
+                except campaigns.CampaignError as exc:
+                    messagebox.showerror(APP_TITLE, str(exc))
+                    return
             try:
                 campaign_id = campaigns.create_campaign(
                     name=name.get(),
@@ -1280,12 +1299,18 @@ class MezzoldApp(tk.Tk):
                     message_variants=parse_variants(message_variants.get("1.0", "end")),
                     media_variants=parse_variants(media_variants.get("1.0", "end")),
                     folder_name=folder_name,
+                    scheduled_at=scheduled_value or None,
                 )
             except campaigns.CampaignError as exc:
                 messagebox.showerror(APP_TITLE, str(exc))
                 return
-            messagebox.showinfo(APP_TITLE, f"Campanha salva para a pasta '{folder_name}'.")
-            self._set_status(f"Campanha #{campaign_id} criada com a pasta '{folder_name}'.")
+            if start_mode.get() == "now":
+                self._set_status(f"Campanha #{campaign_id} criada. Iniciando envio agora.")
+                self._start_campaign_thread(campaign_id, source="ui_create_now")
+                messagebox.showinfo(APP_TITLE, f"Campanha criada para a pasta '{folder_name}' e envio iniciado.")
+            else:
+                self._set_status(f"Campanha #{campaign_id} agendada para {scheduled_value}.")
+                messagebox.showinfo(APP_TITLE, f"Campanha criada para a pasta '{folder_name}' e agendada.")
             self.show_schedule()
 
         folder_combo.bind("<<ComboboxSelected>>", lambda _event: refresh_folder_stats())
