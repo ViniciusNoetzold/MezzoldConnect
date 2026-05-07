@@ -1295,6 +1295,8 @@ class MezzoldApp(tk.Tk):
         refresh_folders()
 
     def show_schedule(self) -> None:
+        return self._show_campaigns_center()
+
         frame = self._screen("Agenda de envios")
         tree = self._campaign_tree(frame)
         tree.pack(fill="both", expand=True)
@@ -1359,6 +1361,335 @@ class MezzoldApp(tk.Tk):
         ttk.Button(controls, text="Enviar agora", style="Accent.TButton", command=send_now).pack(side="left", padx=(8, 0))
         ttk.Button(controls, text="Pausar envio", command=pause).pack(side="left", padx=(8, 0))
         ttk.Button(controls, text="Cancelar envio", command=cancel).pack(side="left", padx=(8, 0))
+        refresh()
+
+    def _show_campaigns_center(self) -> None:
+        frame = self._screen("Agenda de envios")
+        campaign_by_id: dict[int, dict[str, object]] = {}
+        name_var = tk.StringVar()
+        scheduled_at = tk.StringVar()
+        progress = tk.StringVar(value="Escolha uma campanha.")
+        details = tk.StringVar(value="Nenhuma campanha selecionada.")
+        empty_text = tk.StringVar()
+
+        top = ttk.Frame(frame)
+        top.pack(fill="x", pady=(0, 8))
+        refresh_button = ttk.Button(top, text="Atualizar")
+        refresh_button.pack(side="left")
+        open_button = ttk.Button(top, text="Abrir campanha")
+        open_button.pack(side="left", padx=(8, 0))
+        send_button = ttk.Button(top, text="Iniciar agora", style="Accent.TButton")
+        send_button.pack(side="left", padx=(8, 0))
+        schedule_button = ttk.Button(top, text="Agendar")
+        schedule_button.pack(side="left", padx=(8, 0))
+        pause_button = ttk.Button(top, text="Pausar")
+        pause_button.pack(side="left", padx=(8, 0))
+        continue_button = ttk.Button(top, text="Continuar")
+        continue_button.pack(side="left", padx=(8, 0))
+        cancel_button = ttk.Button(top, text="Cancelar")
+        cancel_button.pack(side="left", padx=(8, 0))
+        history_button = ttk.Button(top, text="Ver historico")
+        history_button.pack(side="left", padx=(8, 0))
+
+        ttk.Label(frame, textvariable=empty_text, style="Muted.TLabel").pack(anchor="w", pady=(0, 6))
+
+        columns = ("name", "status", "risk", "scheduled", "folder", "total", "sent", "failed", "progress", "updated")
+        tree = ttk.Treeview(frame, columns=columns, show="headings", selectmode="browse", height=13)
+        headings = {
+            "name": "Nome da campanha",
+            "status": "Status",
+            "risk": "Risco",
+            "scheduled": "Agendamento",
+            "folder": "Pasta",
+            "total": "Total",
+            "sent": "Enviados",
+            "failed": "Falhas",
+            "progress": "Progresso",
+            "updated": "Ultima atualizacao",
+        }
+        widths = {
+            "name": 220,
+            "status": 110,
+            "risk": 70,
+            "scheduled": 145,
+            "folder": 145,
+            "total": 60,
+            "sent": 70,
+            "failed": 60,
+            "progress": 110,
+            "updated": 145,
+        }
+        for column in columns:
+            tree.heading(column, text=headings[column])
+            tree.column(column, width=widths[column], anchor="w")
+        tree.pack(fill="both", expand=True)
+
+        edit_panel = ttk.Frame(frame, style="Panel.TFrame", padding=14)
+        edit_panel.pack(fill="x", pady=(12, 0))
+        ttk.Label(edit_panel, textvariable=details, style="Panel.TLabel", wraplength=980, justify="left").pack(anchor="w", pady=(0, 10))
+        edit_row = ttk.Frame(edit_panel, style="Panel.TFrame")
+        edit_row.pack(fill="x")
+        self._entry(edit_row, "Nome da campanha", name_var).pack(side="left", fill="x", expand=True, padx=(0, 8))
+        self._entry(edit_row, "Agendamento", scheduled_at).pack(side="left", fill="x", expand=True, padx=(0, 8))
+        save_button = ttk.Button(edit_row, text="Salvar alteracoes")
+        save_button.pack(side="left", padx=(0, 8), pady=(20, 0))
+        ttk.Label(edit_panel, textvariable=progress, style="Muted.TLabel").pack(anchor="w", pady=(10, 0))
+
+        def selected_campaign_id(show_warning: bool = True) -> int | None:
+            selection = tree.selection()
+            if not selection:
+                if show_warning:
+                    messagebox.showwarning(APP_TITLE, "Escolha uma campanha primeiro.")
+                return None
+            try:
+                return int(selection[0])
+            except ValueError:
+                return None
+
+        def selected_campaign() -> dict[str, object] | None:
+            campaign_id = selected_campaign_id(show_warning=False)
+            return campaign_by_id.get(campaign_id or 0)
+
+        def progress_label(item: dict[str, object]) -> str:
+            total = int(item.get("total_contacts") or 0)
+            processed = int(item.get("processed_contacts") or 0)
+            percent = int(item.get("progress_percent") or 0)
+            return f"{percent}% ({processed}/{total})" if total else "0% (0/0)"
+
+        def folder_label(item: dict[str, object]) -> str:
+            return str(item.get("folder_name") or "Campanha antiga")
+
+        def on_select(_event: object | None = None) -> None:
+            item = selected_campaign()
+            if not item:
+                name_var.set("")
+                scheduled_at.set("")
+                details.set("Nenhuma campanha selecionada.")
+                progress.set("Escolha uma campanha.")
+                return
+            name_var.set(str(item.get("name") or ""))
+            scheduled_at.set(str(item.get("scheduled_at") or ""))
+            total = int(item.get("total_contacts") or 0)
+            sent = int(item.get("sent_contacts") or 0)
+            failed = int(item.get("failed_contacts") or 0)
+            details.set(
+                f"Status: {friendly_status(item.get('status'))} | "
+                f"Pasta: {folder_label(item)} | "
+                f"Contatos: {total} | Enviados: {sent} | Falhas: {failed} | "
+                f"Atualizada em: {item.get('updated_at') or ''}"
+            )
+            progress.set(progress_label(item))
+
+        def refresh(select_id: int | None = None) -> None:
+            current = select_id or selected_campaign_id(show_warning=False)
+            tree.delete(*tree.get_children())
+            campaign_by_id.clear()
+            items = campaigns.list_campaigns()
+            empty_text.set("" if items else "Nenhuma campanha criada ainda. Crie uma campanha em Nova campanha para comecar.")
+            for item in items:
+                campaign_id = int(item["id"])
+                try:
+                    risk = compliance.refresh_campaign_risk(campaign_id)
+                    item["risk_score"] = risk["score"]
+                except ValueError:
+                    item["risk_score"] = item.get("risk_score") or 0
+                campaign_by_id[campaign_id] = item
+                tree.insert(
+                    "",
+                    "end",
+                    iid=str(campaign_id),
+                    values=(
+                        item.get("name") or "",
+                        friendly_status(item.get("status")),
+                        f"{item.get('risk_score') or 0}%",
+                        item.get("scheduled_at") or "",
+                        folder_label(item),
+                        item.get("total_contacts") or 0,
+                        item.get("sent_contacts") or 0,
+                        item.get("failed_contacts") or 0,
+                        progress_label(item),
+                        item.get("updated_at") or "",
+                    ),
+                )
+            if items:
+                target = str(current) if current in campaign_by_id else str(int(items[0]["id"]))
+                tree.selection_set(target)
+                tree.focus(target)
+            on_select()
+
+        def schedule_selected() -> None:
+            campaign_id = selected_campaign_id()
+            if not campaign_id:
+                return
+            try:
+                campaigns.schedule_campaign(campaign_id, parse_datetime(scheduled_at.get()))
+            except campaigns.CampaignError as exc:
+                messagebox.showerror(APP_TITLE, str(exc))
+                return
+            refresh(campaign_id)
+            self._set_status("Envio agendado.")
+
+        def send_now() -> None:
+            campaign_id = selected_campaign_id()
+            if campaign_id:
+                self._start_campaign_thread(campaign_id, progress, source="ui_manual")
+
+        def continue_campaign() -> None:
+            campaign_id = selected_campaign_id()
+            if campaign_id:
+                self._start_campaign_thread(campaign_id, progress, source="ui_continue", allow_resume=True)
+
+        def pause() -> None:
+            campaign_id = selected_campaign_id()
+            if not campaign_id:
+                return
+            event = self.running_events.get(campaign_id)
+            if event:
+                event.set()
+            try:
+                campaigns.pause_campaign(campaign_id)
+            except campaigns.CampaignError as exc:
+                messagebox.showerror(APP_TITLE, str(exc))
+                return
+            refresh(campaign_id)
+            self._set_status("Campanha pausada.")
+
+        def cancel() -> None:
+            campaign_id = selected_campaign_id()
+            if not campaign_id:
+                return
+            if not messagebox.askyesno(APP_TITLE, "Cancelar esta campanha? Ela nao sera enviada."):
+                return
+            campaigns.cancel_campaign(campaign_id)
+            refresh(campaign_id)
+            self._set_status("Campanha cancelada.")
+
+        def save_changes() -> None:
+            campaign_id = selected_campaign_id()
+            if not campaign_id:
+                return
+            try:
+                scheduled_value = parse_datetime(scheduled_at.get()) if scheduled_at.get().strip() else ""
+                campaigns.update_campaign_details(campaign_id, name_var.get(), scheduled_value)
+            except campaigns.CampaignError as exc:
+                messagebox.showerror(APP_TITLE, str(exc))
+                return
+            refresh(campaign_id)
+            self._set_status("Campanha atualizada.")
+
+        def open_campaign() -> None:
+            campaign_id = selected_campaign_id()
+            if not campaign_id:
+                return
+            campaign = campaigns.get_campaign(campaign_id)
+            if not campaign:
+                messagebox.showerror(APP_TITLE, "Campanha nao encontrada.")
+                return
+            dialog = tk.Toplevel(self)
+            dialog.title(f"Campanha #{campaign_id}")
+            dialog.geometry("860x520")
+            panel = ttk.Frame(dialog, padding=16)
+            panel.pack(fill="both", expand=True)
+            summary = (
+                f"{campaign.get('name') or ''}\n"
+                f"Status: {friendly_status(campaign.get('status'))} | "
+                f"Pasta: {campaign.get('folder_name') or 'Campanha antiga'} | "
+                f"Agendamento: {campaign.get('scheduled_at') or ''}\n"
+                f"Template: {campaign.get('template_name') or ''} | Idioma: {campaign.get('template_language') or ''}"
+            )
+            ttk.Label(panel, text=summary, style="Panel.TLabel", justify="left", wraplength=820).pack(anchor="w", pady=(0, 10))
+            message_box = tk.Text(panel, height=5, wrap="word")
+            message_box.pack(fill="x", pady=(0, 10))
+            message_box.insert("1.0", str(campaign.get("message") or ""))
+            message_box.configure(state="disabled")
+            contact_tree = ttk.Treeview(panel, columns=("name", "phone", "status", "error"), show="headings")
+            for column, heading, width in [
+                ("name", "Contato", 210),
+                ("phone", "Telefone", 130),
+                ("status", "Status", 130),
+                ("error", "Ultimo erro", 360),
+            ]:
+                contact_tree.heading(column, text=heading)
+                contact_tree.column(column, width=width, anchor="w")
+            contact_tree.pack(fill="both", expand=True)
+            for contact in campaigns.get_campaign_contacts(campaign_id):
+                contact_tree.insert(
+                    "",
+                    "end",
+                    values=(
+                        contact.get("name") or "",
+                        contact.get("phone") or "",
+                        friendly_status(contact.get("campaign_status")),
+                        contact.get("last_error") or "",
+                    ),
+                )
+
+        def show_campaign_history() -> None:
+            campaign_id = selected_campaign_id()
+            if not campaign_id:
+                return
+            dialog = tk.Toplevel(self)
+            dialog.title(f"Historico da campanha #{campaign_id}")
+            dialog.geometry("980x520")
+            panel = ttk.Frame(dialog, padding=16)
+            panel.pack(fill="both", expand=True)
+            logs = campaigns.list_campaign_logs(campaign_id)
+            ttk.Label(
+                panel,
+                text="" if logs else "Esta campanha ainda nao tem historico de envio.",
+                style="Muted.TLabel",
+            ).pack(anchor="w", pady=(0, 8))
+            log_tree = ttk.Treeview(panel, columns=("created", "recipient", "phone", "status", "action", "error"), show="headings")
+            for column, heading, width in [
+                ("created", "Data/hora", 145),
+                ("recipient", "Contato", 170),
+                ("phone", "Telefone", 130),
+                ("status", "Status", 120),
+                ("action", "Manual", 110),
+                ("error", "Erro", 360),
+            ]:
+                log_tree.heading(column, text=heading)
+                log_tree.column(column, width=width, anchor="w")
+            log_tree.pack(fill="both", expand=True)
+            action_urls: dict[str, str] = {}
+            for log in logs:
+                node = log_tree.insert(
+                    "",
+                    "end",
+                    values=(
+                        log.get("created_at") or "",
+                        log.get("recipient_name") or "",
+                        log.get("phone") or "",
+                        friendly_status(log.get("status")),
+                        "Abrir" if log.get("action_url") else "",
+                        log.get("error_message") or "",
+                    ),
+                )
+                if log.get("action_url"):
+                    action_urls[node] = str(log["action_url"])
+
+            def open_manual_link() -> None:
+                if not log_tree.selection():
+                    messagebox.showwarning(APP_TITLE, "Escolha uma linha com link manual.")
+                    return
+                url = action_urls.get(log_tree.selection()[0])
+                if not url:
+                    messagebox.showwarning(APP_TITLE, "Esta linha nao tem link manual.")
+                    return
+                webbrowser.open(url)
+
+            ttk.Button(panel, text="Abrir link manual", command=open_manual_link).pack(anchor="w", pady=(10, 0))
+
+        tree.bind("<<TreeviewSelect>>", on_select)
+        refresh_button.configure(command=refresh)
+        open_button.configure(command=open_campaign)
+        send_button.configure(command=send_now)
+        schedule_button.configure(command=schedule_selected)
+        pause_button.configure(command=pause)
+        continue_button.configure(command=continue_campaign)
+        cancel_button.configure(command=cancel)
+        history_button.configure(command=show_campaign_history)
+        save_button.configure(command=save_changes)
         refresh()
 
     def show_risk(self) -> None:
