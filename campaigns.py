@@ -129,6 +129,11 @@ def create_campaign(
             ],
         )
     compliance.refresh_campaign_risk(campaign_id)
+    _send_log(
+        "CREATE "
+        f"campaign_id={campaign_id} status={status} scheduled_at={scheduled_at or '-'} "
+        f"folder={_preview(folder_name)} contacts={len(contact_ids)}"
+    )
     return campaign_id
 
 
@@ -251,6 +256,7 @@ def schedule_campaign(campaign_id: int, scheduled_at: str) -> None:
             """,
             (CAMPAIGN_STATUS_SCHEDULED, scheduled_at.strip(), now_text(), campaign_id),
         )
+    _send_log(f"SCHEDULE campaign_id={campaign_id} scheduled_at={scheduled_at.strip()}")
 
 
 def update_campaign_details(campaign_id: int, name: str, scheduled_at: str = "") -> None:
@@ -281,6 +287,11 @@ def update_campaign_details(campaign_id: int, name: str, scheduled_at: str = "")
             """,
             (name, scheduled_at or None, new_status, now_text(), campaign_id),
         )
+    _send_log(
+        "UPDATE "
+        f"campaign_id={campaign_id} status={new_status} scheduled_at={scheduled_at or '-'} "
+        f"name={_preview(name)}"
+    )
 
 
 def pause_campaign(campaign_id: int) -> None:
@@ -291,10 +302,18 @@ def pause_campaign(campaign_id: int) -> None:
     if status in CAMPAIGN_TERMINAL_STATUSES:
         raise CampaignError(f"Campanha com status '{status}' não pode ser pausada.")
     _set_campaign_status(campaign_id, CAMPAIGN_STATUS_PAUSED)
+    _send_log(f"PAUSE campaign_id={campaign_id} previous_status={status}")
 
 
 def cancel_campaign(campaign_id: int) -> None:
+    campaign = get_campaign(campaign_id)
+    if not campaign:
+        raise CampaignError("Não encontrei essa campanha.")
+    status = str(campaign.get("status") or "")
+    if status in {CAMPAIGN_STATUS_DONE, CAMPAIGN_STATUS_DONE_LEGACY, CAMPAIGN_STATUS_CANCELLED}:
+        raise CampaignError(f"Campanha com status '{status}' não pode ser cancelada.")
     _set_campaign_status(campaign_id, CAMPAIGN_STATUS_CANCELLED)
+    _send_log(f"CANCEL campaign_id={campaign_id} previous_status={status}")
 
 
 def mark_draft(campaign_id: int) -> None:
@@ -305,6 +324,7 @@ def mark_draft(campaign_id: int) -> None:
     if status in CAMPAIGN_TERMINAL_STATUSES or status == CAMPAIGN_STATUS_SENDING:
         raise CampaignError(f"Campanha com status '{status}' não pode voltar para rascunho.")
     _set_campaign_status(campaign_id, CAMPAIGN_STATUS_DRAFT)
+    _send_log(f"DRAFT campaign_id={campaign_id} previous_status={status}")
 
 
 def _set_campaign_status(campaign_id: int, status: str) -> None:
@@ -690,6 +710,10 @@ def send_campaign(
         )
     except Exception as exc:
         _send_log(f"ABORT campaign_id={campaign_id} owner={lock_owner} error={_preview(exc)}")
+        current = get_campaign(campaign_id)
+        if current and str(current.get("status") or "") not in CAMPAIGN_TERMINAL_STATUSES:
+            _set_campaign_status(campaign_id, CAMPAIGN_STATUS_ERROR)
+            _send_log(f"ERROR_STATUS campaign_id={campaign_id} status={CAMPAIGN_STATUS_ERROR}")
         raise
     finally:
         _release_campaign_lock(campaign_id, lock_owner)
