@@ -171,16 +171,22 @@ def list_campaigns() -> list[dict[str, Any]]:
             """
             SELECT
                 c.*,
-                COUNT(cc.contact_id) AS total_contacts,
-                SUM(CASE WHEN cc.status = 'enviado' THEN 1 ELSE 0 END) AS sent_contacts,
-                SUM(CASE WHEN cc.status = 'falhou' THEN 1 ELSE 0 END) AS failed_contacts
+                COALESCE(COUNT(cc.contact_id), 0) AS total_contacts,
+                COALESCE(SUM(CASE WHEN cc.status = 'enviado' THEN 1 ELSE 0 END), 0) AS sent_contacts,
+                COALESCE(SUM(CASE WHEN cc.status = 'falhou' THEN 1 ELSE 0 END), 0) AS failed_contacts,
+                COALESCE(SUM(CASE WHEN cc.status IN ('enviado', 'falhou', 'bloqueado', 'sem_autorizacao', 'aguardando_manual') THEN 1 ELSE 0 END), 0) AS processed_contacts
             FROM campaigns c
             LEFT JOIN campaign_contacts cc ON cc.campaign_id = c.id
             GROUP BY c.id
             ORDER BY c.created_at DESC
             """
         ).fetchall()
-    return rows_to_dicts(rows)
+    items = rows_to_dicts(rows)
+    for item in items:
+        total = int(item.get("total_contacts") or 0)
+        processed = int(item.get("processed_contacts") or 0)
+        item["progress_percent"] = int(round((processed / total) * 100)) if total else 0
+    return items
 
 
 def has_pending_contacts(campaign_id: int) -> bool:
@@ -244,6 +250,36 @@ def schedule_campaign(campaign_id: int, scheduled_at: str) -> None:
             WHERE id = ?
             """,
             (CAMPAIGN_STATUS_SCHEDULED, scheduled_at.strip(), now_text(), campaign_id),
+        )
+
+
+def update_campaign_details(campaign_id: int, name: str, scheduled_at: str = "") -> None:
+    campaign = get_campaign(campaign_id)
+    if not campaign:
+        raise CampaignError("Não encontrei essa campanha.")
+    name = name.strip()
+    scheduled_at = scheduled_at.strip()
+    if not name:
+        raise CampaignError("Dê um nome para a campanha.")
+
+    status = str(campaign.get("status") or "")
+    new_status = status
+    if scheduled_at != str(campaign.get("scheduled_at") or ""):
+        if status in CAMPAIGN_TERMINAL_STATUSES or status == CAMPAIGN_STATUS_SENDING:
+            raise CampaignError(f"Campanha com status '{status}' não pode ter agendamento alterado.")
+        if scheduled_at:
+            new_status = CAMPAIGN_STATUS_SCHEDULED
+        elif status == CAMPAIGN_STATUS_SCHEDULED:
+            new_status = CAMPAIGN_STATUS_DRAFT
+
+    with connect() as conn:
+        conn.execute(
+            """
+            UPDATE campaigns
+            SET name = ?, scheduled_at = ?, status = ?, updated_at = ?
+            WHERE id = ?
+            """,
+            (name, scheduled_at or None, new_status, now_text(), campaign_id),
         )
 
 
@@ -323,6 +359,24 @@ def list_logs(limit: int = 300) -> list[dict[str, Any]]:
             LIMIT ?
             """,
             (limit,),
+        ).fetchall()
+    return rows_to_dicts(rows)
+
+
+def list_campaign_logs(campaign_id: int, limit: int = 300) -> list[dict[str, Any]]:
+    with connect() as conn:
+        rows = conn.execute(
+            """
+            SELECT
+                message_logs.*,
+                campaigns.name AS campaign_name
+            FROM message_logs
+            LEFT JOIN campaigns ON campaigns.id = message_logs.campaign_id
+            WHERE message_logs.campaign_id = ?
+            ORDER BY message_logs.created_at DESC
+            LIMIT ?
+            """,
+            (campaign_id, limit),
         ).fetchall()
     return rows_to_dicts(rows)
 
