@@ -1146,6 +1146,10 @@ class MezzoldApp(tk.Tk):
         media_path = tk.StringVar()
         start_mode = tk.StringVar(value="now")
         start_at = tk.StringVar(value=datetime.now().strftime("%Y-%m-%d %H:%M"))
+        delay_min = tk.StringVar(value=str(campaigns.DEFAULT_DELAY_MIN_SECONDS))
+        delay_max = tk.StringVar(value=str(campaigns.DEFAULT_DELAY_MAX_SECONDS))
+        delay_info = tk.StringVar(value="")
+        delay_customized = tk.BooleanVar(value=False)
 
         self._entry(form, "Nome para identificar esta campanha", name).pack(fill="x", pady=(0, 10))
         category_frame = ttk.Frame(form, style="Panel.TFrame")
@@ -1192,6 +1196,16 @@ class MezzoldApp(tk.Tk):
         ttk.Radiobutton(schedule_row, text="Agendar para", variable=start_mode, value="schedule").pack(side="left")
         ttk.Entry(schedule_row, textvariable=start_at, width=22).pack(side="left", padx=(8, 0))
 
+        delay_panel = ttk.Frame(form, style="Panel.TFrame")
+        delay_panel.pack(fill="x", pady=(0, 12))
+        ttk.Label(delay_panel, text="Intervalo entre mensagens", style="Panel.TLabel").pack(anchor="w", pady=(0, 4))
+        delay_row = ttk.Frame(delay_panel, style="Panel.TFrame")
+        delay_row.pack(fill="x")
+        self._entry(delay_row, "Mínimo (segundos)", delay_min).pack(side="left", fill="x", expand=True, padx=(0, 8))
+        self._entry(delay_row, "Máximo (segundos)", delay_max).pack(side="left", fill="x", expand=True, padx=(0, 8))
+        ttk.Button(delay_row, text="Usar recomendacao", command=lambda: apply_delay_recommendation()).pack(side="left", pady=(20, 0))
+        ttk.Label(delay_panel, textvariable=delay_info, style="Muted.TLabel", wraplength=640).pack(anchor="w", pady=(6, 0))
+
         folder_panel = ttk.Frame(frame, style="Panel.TFrame", padding=16)
         folder_panel.pack(side="right", fill="y", padx=(16, 0))
         ttk.Label(folder_panel, text="Pasta de contatos", style="Panel.TLabel", font=("Segoe UI Semibold", 11)).pack(anchor="w")
@@ -1228,10 +1242,28 @@ class MezzoldApp(tk.Tk):
                 if item.get("opt_in") and not item.get("blacklisted")
             ]
 
+        def update_delay_info() -> None:
+            try:
+                delay_min_value, delay_max_value = campaigns.normalize_campaign_delay(delay_min.get(), delay_max.get())
+                level, message = campaigns.delay_recommendation_message(delay_min_value, delay_max_value)
+                delay_info.set(f"{message} Configurado: {delay_min_value}-{delay_max_value}s.")
+            except campaigns.CampaignError as exc:
+                delay_info.set(str(exc))
+
+        def apply_delay_recommendation() -> None:
+            folder_name = selected_folder.get().strip()
+            total = len(eligible_contacts(folder_name)) if folder_name else 0
+            recommended_min, recommended_max = campaigns.recommended_delay_for_contacts(total)
+            delay_min.set(str(recommended_min))
+            delay_max.set(str(recommended_max))
+            delay_customized.set(False)
+            update_delay_info()
+
         def refresh_folder_stats() -> None:
             folder_name = selected_folder.get().strip()
             if not folder_name:
                 folder_stats.set("Escolha uma pasta para ver os contatos.")
+                update_delay_info()
                 return
             items = folder_contacts(folder_name)
             opt_in_count = sum(1 for item in items if item.get("opt_in") and not item.get("blacklisted"))
@@ -1243,6 +1275,10 @@ class MezzoldApp(tk.Tk):
                 f"Ja usados/enviados: {used_count}\n"
                 f"Blacklist: {blacklist_count}"
             )
+            if not delay_customized.get():
+                apply_delay_recommendation()
+            else:
+                update_delay_info()
 
         def refresh_folders(select_name: str = "") -> None:
             values = folder_values()
@@ -1280,6 +1316,17 @@ class MezzoldApp(tk.Tk):
             if not selected:
                 messagebox.showerror(APP_TITLE, "A pasta selecionada nao tem contatos com opt-in liberados.")
                 return
+            try:
+                delay_min_value, delay_max_value = campaigns.normalize_campaign_delay(delay_min.get(), delay_max.get(), len(selected))
+            except campaigns.CampaignError as exc:
+                messagebox.showerror(APP_TITLE, str(exc))
+                return
+            delay_level, delay_message = campaigns.delay_recommendation_message(delay_min_value, delay_max_value)
+            if delay_level == "alto" and not messagebox.askyesno(
+                APP_TITLE,
+                f"{delay_message}\n\nDeseja criar a campanha mesmo assim?",
+            ):
+                return
             scheduled_value = ""
             if start_mode.get() == "schedule":
                 try:
@@ -1300,6 +1347,8 @@ class MezzoldApp(tk.Tk):
                     media_variants=parse_variants(media_variants.get("1.0", "end")),
                     folder_name=folder_name,
                     scheduled_at=scheduled_value or None,
+                    delay_min_seconds=delay_min_value,
+                    delay_max_seconds=delay_max_value,
                 )
             except campaigns.CampaignError as exc:
                 messagebox.showerror(APP_TITLE, str(exc))
@@ -1313,6 +1362,12 @@ class MezzoldApp(tk.Tk):
                 messagebox.showinfo(APP_TITLE, f"Campanha criada para a pasta '{folder_name}' e agendada.")
             self.show_schedule()
 
+        def on_delay_edit(*_args: object) -> None:
+            delay_customized.set(True)
+            update_delay_info()
+
+        delay_min.trace_add("write", on_delay_edit)
+        delay_max.trace_add("write", on_delay_edit)
         folder_combo.bind("<<ComboboxSelected>>", lambda _event: refresh_folder_stats())
         new_folder_button.configure(command=create_folder)
         import_button.configure(command=open_import)
@@ -1393,6 +1448,9 @@ class MezzoldApp(tk.Tk):
         campaign_by_id: dict[int, dict[str, object]] = {}
         name_var = tk.StringVar()
         scheduled_at = tk.StringVar()
+        delay_min_var = tk.StringVar()
+        delay_max_var = tk.StringVar()
+        delay_details = tk.StringVar()
         progress = tk.StringVar(value="Escolha uma campanha.")
         details = tk.StringVar(value="Nenhuma campanha selecionada.")
         empty_text = tk.StringVar()
@@ -1418,7 +1476,7 @@ class MezzoldApp(tk.Tk):
 
         ttk.Label(frame, textvariable=empty_text, style="Muted.TLabel").pack(anchor="w", pady=(0, 6))
 
-        columns = ("name", "status", "risk", "scheduled", "folder", "total", "sent", "failed", "progress", "updated")
+        columns = ("name", "status", "risk", "scheduled", "folder", "delay", "total", "sent", "failed", "progress", "updated")
         tree = ttk.Treeview(frame, columns=columns, show="headings", selectmode="browse", height=13)
         headings = {
             "name": "Nome da campanha",
@@ -1426,6 +1484,7 @@ class MezzoldApp(tk.Tk):
             "risk": "Risco",
             "scheduled": "Agendamento",
             "folder": "Pasta",
+            "delay": "Delay",
             "total": "Total",
             "sent": "Enviados",
             "failed": "Falhas",
@@ -1438,6 +1497,7 @@ class MezzoldApp(tk.Tk):
             "risk": 70,
             "scheduled": 145,
             "folder": 145,
+            "delay": 90,
             "total": 60,
             "sent": 70,
             "failed": 60,
@@ -1456,8 +1516,11 @@ class MezzoldApp(tk.Tk):
         edit_row.pack(fill="x")
         self._entry(edit_row, "Nome da campanha", name_var).pack(side="left", fill="x", expand=True, padx=(0, 8))
         self._entry(edit_row, "Agendamento", scheduled_at).pack(side="left", fill="x", expand=True, padx=(0, 8))
+        self._entry(edit_row, "Delay min", delay_min_var).pack(side="left", fill="x", expand=True, padx=(0, 8))
+        self._entry(edit_row, "Delay max", delay_max_var).pack(side="left", fill="x", expand=True, padx=(0, 8))
         save_button = ttk.Button(edit_row, text="Salvar alteracoes")
         save_button.pack(side="left", padx=(0, 8), pady=(20, 0))
+        ttk.Label(edit_panel, textvariable=delay_details, style="Muted.TLabel").pack(anchor="w", pady=(8, 0))
         ttk.Label(edit_panel, textvariable=progress, style="Muted.TLabel").pack(anchor="w", pady=(10, 0))
 
         def selected_campaign_id(show_warning: bool = True) -> int | None:
@@ -1484,22 +1547,35 @@ class MezzoldApp(tk.Tk):
         def folder_label(item: dict[str, object]) -> str:
             return str(item.get("folder_name") or "Campanha antiga")
 
+        def delay_label(item: dict[str, object]) -> str:
+            minimum = int(item.get("delay_min_seconds") or campaigns.DEFAULT_DELAY_MIN_SECONDS)
+            maximum = int(item.get("delay_max_seconds") or campaigns.DEFAULT_DELAY_MAX_SECONDS)
+            return f"{minimum}-{maximum}s"
+
         def on_select(_event: object | None = None) -> None:
             item = selected_campaign()
             if not item:
                 name_var.set("")
                 scheduled_at.set("")
+                delay_min_var.set("")
+                delay_max_var.set("")
+                delay_details.set("")
                 details.set("Nenhuma campanha selecionada.")
                 progress.set("Escolha uma campanha.")
                 return
             name_var.set(str(item.get("name") or ""))
             scheduled_at.set(str(item.get("scheduled_at") or ""))
+            delay_min_var.set(str(item.get("delay_min_seconds") or campaigns.DEFAULT_DELAY_MIN_SECONDS))
+            delay_max_var.set(str(item.get("delay_max_seconds") or campaigns.DEFAULT_DELAY_MAX_SECONDS))
+            level, delay_message = campaigns.delay_recommendation_message(delay_min_var.get(), delay_max_var.get())
+            delay_details.set(f"{delay_message} Configurado: {delay_label(item)}.")
             total = int(item.get("total_contacts") or 0)
             sent = int(item.get("sent_contacts") or 0)
             failed = int(item.get("failed_contacts") or 0)
             details.set(
                 f"Status: {friendly_status(item.get('status'))} | "
                 f"Pasta: {folder_label(item)} | "
+                f"Delay: {delay_label(item)} | "
                 f"Contatos: {total} | Enviados: {sent} | Falhas: {failed} | "
                 f"Atualizada em: {item.get('updated_at') or ''}"
             )
@@ -1529,6 +1605,7 @@ class MezzoldApp(tk.Tk):
                         f"{item.get('risk_score') or 0}%",
                         item.get("scheduled_at") or "",
                         folder_label(item),
+                        delay_label(item),
                         item.get("total_contacts") or 0,
                         item.get("sent_contacts") or 0,
                         item.get("failed_contacts") or 0,
@@ -1595,7 +1672,20 @@ class MezzoldApp(tk.Tk):
                 return
             try:
                 scheduled_value = parse_datetime(scheduled_at.get()) if scheduled_at.get().strip() else ""
-                campaigns.update_campaign_details(campaign_id, name_var.get(), scheduled_value)
+                delay_min_value, delay_max_value = campaigns.normalize_campaign_delay(delay_min_var.get(), delay_max_var.get())
+                delay_level, delay_message = campaigns.delay_recommendation_message(delay_min_value, delay_max_value)
+                if delay_level == "alto" and not messagebox.askyesno(
+                    APP_TITLE,
+                    f"{delay_message}\n\nDeseja salvar esse delay mesmo assim?",
+                ):
+                    return
+                campaigns.update_campaign_details(
+                    campaign_id,
+                    name_var.get(),
+                    scheduled_value,
+                    delay_min_seconds=delay_min_value,
+                    delay_max_seconds=delay_max_value,
+                )
             except campaigns.CampaignError as exc:
                 messagebox.showerror(APP_TITLE, str(exc))
                 return
@@ -1620,9 +1710,38 @@ class MezzoldApp(tk.Tk):
                 f"Status: {friendly_status(campaign.get('status'))} | "
                 f"Pasta: {campaign.get('folder_name') or 'Campanha antiga'} | "
                 f"Agendamento: {campaign.get('scheduled_at') or ''}\n"
-                f"Template: {campaign.get('template_name') or ''} | Idioma: {campaign.get('template_language') or ''}"
+                f"Template: {campaign.get('template_name') or ''} | Idioma: {campaign.get('template_language') or ''} | "
+                f"Delay: {campaign.get('delay_min_seconds') or campaigns.DEFAULT_DELAY_MIN_SECONDS}-{campaign.get('delay_max_seconds') or campaigns.DEFAULT_DELAY_MAX_SECONDS}s"
             )
             ttk.Label(panel, text=summary, style="Panel.TLabel", justify="left", wraplength=820).pack(anchor="w", pady=(0, 10))
+            dialog_delay_min = tk.StringVar(value=str(campaign.get("delay_min_seconds") or campaigns.DEFAULT_DELAY_MIN_SECONDS))
+            dialog_delay_max = tk.StringVar(value=str(campaign.get("delay_max_seconds") or campaigns.DEFAULT_DELAY_MAX_SECONDS))
+            delay_row = ttk.Frame(panel)
+            delay_row.pack(fill="x", pady=(0, 10))
+            self._entry(delay_row, "Delay mínimo", dialog_delay_min).pack(side="left", fill="x", expand=True, padx=(0, 8))
+            self._entry(delay_row, "Delay máximo", dialog_delay_max).pack(side="left", fill="x", expand=True, padx=(0, 8))
+
+            def save_dialog_delay() -> None:
+                try:
+                    delay_min_value, delay_max_value = campaigns.normalize_campaign_delay(dialog_delay_min.get(), dialog_delay_max.get())
+                    level, message = campaigns.delay_recommendation_message(delay_min_value, delay_max_value)
+                    if level == "alto" and not messagebox.askyesno(APP_TITLE, f"{message}\n\nDeseja salvar mesmo assim?"):
+                        return
+                    campaigns.update_campaign_details(
+                        campaign_id,
+                        str(campaign.get("name") or ""),
+                        str(campaign.get("scheduled_at") or ""),
+                        delay_min_seconds=delay_min_value,
+                        delay_max_seconds=delay_max_value,
+                    )
+                except campaigns.CampaignError as exc:
+                    messagebox.showerror(APP_TITLE, str(exc))
+                    return
+                self._set_status("Delay da campanha atualizado.")
+                dialog.destroy()
+                refresh(campaign_id)
+
+            ttk.Button(delay_row, text="Salvar delay", command=save_dialog_delay).pack(side="left", pady=(20, 0))
             message_box = tk.Text(panel, height=5, wrap="word")
             message_box.pack(fill="x", pady=(0, 10))
             message_box.insert("1.0", str(campaign.get("message") or ""))
