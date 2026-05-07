@@ -297,6 +297,9 @@ def initialize_database() -> None:
             "rampup_daily_floor": "5",
             "block_high_risk_campaigns": "1",
             "company_name": "Mezzold",
+            "app_theme": "light",
+            "ui_font_size": "10",
+            "ui_density": "normal",
         }
         for key, value in defaults.items():
             conn.execute(
