@@ -22,6 +22,7 @@ from database import APP_TITLE, APP_VERSION, DB_PATH, DEFAULT_CONTACT_FOLDER, co
 
 WHATSAPP_POLICY_URL = "https://www.whatsapp.com/legal/business-policy/"
 META_CLOUD_API_URL = "https://meta-preview.mintlify.io/docs/whatsapp/cloud-api/overview"
+APP_UPDATES_URL = "https://github.com/ViniciusNoetzold/MezzoldConnect/releases"
 
 STATUS_LABELS = {
     "rascunho": "Rascunho",
@@ -82,18 +83,43 @@ class MezzoldApp(tk.Tk):
             style.theme_use("clam")
         except tk.TclError:
             pass
-        style.configure("TFrame", background="#f6f7fb")
-        style.configure("Panel.TFrame", background="#ffffff")
-        style.configure("Sidebar.TFrame", background="#1f2937")
-        style.configure("TLabel", background="#f6f7fb", foreground="#111827", font=("Segoe UI", 10))
-        style.configure("Panel.TLabel", background="#ffffff")
-        style.configure("Title.TLabel", font=("Segoe UI Semibold", 18), background="#f6f7fb")
-        style.configure("Metric.TLabel", font=("Segoe UI Semibold", 20), background="#ffffff")
-        style.configure("Muted.TLabel", foreground="#6b7280", background="#ffffff")
-        style.configure("Sidebar.TButton", font=("Segoe UI", 10), padding=(12, 8))
-        style.configure("Accent.TButton", font=("Segoe UI Semibold", 10), padding=(12, 8))
-        style.configure("Treeview", rowheight=26, font=("Segoe UI", 10))
-        style.configure("Treeview.Heading", font=("Segoe UI Semibold", 10))
+        theme = get_setting("app_theme", "light")
+        try:
+            font_size = int(get_setting("ui_font_size", "10"))
+        except ValueError:
+            font_size = 10
+        font_size = min(max(font_size, 9), 14)
+        density = get_setting("ui_density", "normal")
+        density_padding = {"compact": (10, 6), "normal": (12, 8), "comfortable": (14, 10)}.get(density, (12, 8))
+        rowheight = {"compact": 22, "normal": 26, "comfortable": 30}.get(density, 26)
+        if theme == "dark":
+            bg = "#0f172a"
+            panel_bg = "#111827"
+            fg = "#e5e7eb"
+            muted = "#9ca3af"
+            sidebar_bg = "#020617"
+        else:
+            bg = "#f6f7fb"
+            panel_bg = "#ffffff"
+            fg = "#111827"
+            muted = "#6b7280"
+            sidebar_bg = "#1f2937"
+        self._ui_background = bg
+        style.configure("TFrame", background=bg)
+        style.configure("Panel.TFrame", background=panel_bg)
+        style.configure("Sidebar.TFrame", background=sidebar_bg)
+        style.configure("TLabel", background=bg, foreground=fg, font=("Segoe UI", font_size))
+        style.configure("Panel.TLabel", background=panel_bg, foreground=fg)
+        style.configure("Title.TLabel", font=("Segoe UI Semibold", font_size + 8), background=bg, foreground=fg)
+        style.configure("Metric.TLabel", font=("Segoe UI Semibold", font_size + 10), background=panel_bg, foreground=fg)
+        style.configure("Muted.TLabel", foreground=muted, background=panel_bg, font=("Segoe UI", font_size))
+        style.configure("Sidebar.TButton", font=("Segoe UI", font_size), padding=density_padding)
+        style.configure("Accent.TButton", font=("Segoe UI Semibold", font_size), padding=density_padding)
+        style.configure("TButton", font=("Segoe UI", font_size), padding=density_padding)
+        style.configure("TCheckbutton", background=panel_bg, foreground=fg, font=("Segoe UI", font_size))
+        style.configure("TRadiobutton", background=panel_bg, foreground=fg, font=("Segoe UI", font_size))
+        style.configure("Treeview", rowheight=rowheight, font=("Segoe UI", font_size))
+        style.configure("Treeview.Heading", font=("Segoe UI Semibold", font_size))
 
     def _clear(self) -> None:
         for child in self.winfo_children():
@@ -208,7 +234,7 @@ class MezzoldApp(tk.Tk):
         return frame
 
     def _scrollable_frame(self, parent: tk.Widget) -> ttk.Frame:
-        canvas = tk.Canvas(parent, background="#f6f7fb", highlightthickness=0)
+        canvas = tk.Canvas(parent, background=getattr(self, "_ui_background", "#f6f7fb"), highlightthickness=0)
         scrollbar = ttk.Scrollbar(parent, orient="vertical", command=canvas.yview)
         inner = ttk.Frame(canvas)
         window_id = canvas.create_window((0, 0), window=inner, anchor="nw")
@@ -2291,6 +2317,8 @@ class MezzoldApp(tk.Tk):
         refresh()
 
     def show_settings(self) -> None:
+        return self._show_settings_center()
+
         frame = self._screen("Configurações")
         frame = self._scrollable_frame(frame)
         config = whatsapp.load_config()
@@ -2511,6 +2539,251 @@ class MezzoldApp(tk.Tk):
             "Aplicativo local para cuidar de clientes, campanhas, aquecimento de números, histórico e segurança dos envios."
         )
         ttk.Label(right, text=about, style="Muted.TLabel", wraplength=430).pack(anchor="w", pady=(20, 0))
+
+    def _show_settings_center(self) -> None:
+        frame = self._screen("Configurações")
+        frame = self._scrollable_frame(frame)
+        config = whatsapp.load_config()
+
+        header = ttk.Frame(frame, style="Panel.TFrame", padding=16)
+        header.pack(fill="x", pady=(0, 12))
+        ttk.Label(header, text=f"{APP_TITLE} {APP_VERSION}", style="Panel.TLabel", font=("Segoe UI Semibold", 14)).pack(anchor="w")
+        ttk.Label(
+            header,
+            text=f"Banco local: {DB_PATH}\nAtualizações: o botão abaixo abre a página oficial de releases do projeto.",
+            style="Muted.TLabel",
+            wraplength=920,
+        ).pack(anchor="w", pady=(6, 0))
+
+        columns = ttk.Frame(frame)
+        columns.pack(fill="both", expand=True)
+        left = ttk.Frame(columns, style="Panel.TFrame", padding=16)
+        right = ttk.Frame(columns, style="Panel.TFrame", padding=16)
+        left.grid(row=0, column=0, sticky="nsew", padx=(0, 10))
+        right.grid(row=0, column=1, sticky="nsew", padx=(10, 0))
+        columns.columnconfigure(0, weight=1, uniform="settings")
+        columns.columnconfigure(1, weight=1, uniform="settings")
+
+        def section(parent: ttk.Frame, title: str, note: str = "") -> None:
+            ttk.Label(parent, text=title, style="Panel.TLabel", font=("Segoe UI Semibold", 12)).pack(anchor="w", pady=(18, 0))
+            if note:
+                ttk.Label(parent, text=note, style="Muted.TLabel", wraplength=500).pack(anchor="w", pady=(4, 0))
+
+        token = tk.StringVar()
+        phone_number_id = tk.StringVar(value=config.phone_number_id)
+        business_account_id = tk.StringVar(value=config.business_account_id)
+        webhook_url = tk.StringVar(value=config.webhook_url)
+        api_version = tk.StringVar(value=config.api_version)
+        default_template = tk.StringVar(value=config.default_template)
+        default_language = tk.StringVar(value=config.default_language)
+        company_name = tk.StringVar(value=get_setting("company_name", "Mezzold"))
+        interval = tk.StringVar(value=str(config.send_interval_seconds))
+        daily_limit = tk.StringVar(value=str(config.daily_send_limit))
+        delivery_modes = {
+            "Envio oficial pela Meta": "official_api",
+            "Modo manual com link": "manual_assisted",
+        }
+        delivery_mode_labels = {value: label for label, value in delivery_modes.items()}
+        delivery_mode = tk.StringVar(value=delivery_mode_labels.get(config.delivery_mode, "Envio oficial pela Meta"))
+        dry_run = tk.BooleanVar(value=config.dry_run)
+        block_high_risk = tk.BooleanVar(value=get_setting("block_high_risk_campaigns", "1") == "1")
+        smart_send = tk.BooleanVar(value=get_setting("smart_send_enabled", "0") == "1")
+        smart_min_interval = tk.StringVar(value=get_setting("smart_min_interval_seconds", "30"))
+        smart_max_interval = tk.StringVar(value=get_setting("smart_max_interval_seconds", "45"))
+        smart_pause_every = tk.StringVar(value=get_setting("smart_pause_every", "10"))
+        smart_pause_min = tk.StringVar(value=get_setting("smart_pause_min_seconds", "120"))
+        smart_pause_max = tk.StringVar(value=get_setting("smart_pause_max_seconds", "300"))
+        smart_daily_limit = tk.StringVar(value=get_setting("smart_daily_limit", "100"))
+        smart_max_session = tk.StringVar(value=get_setting("smart_max_session_minutes", "90"))
+        rampup_min_interval = tk.StringVar(value=get_setting("rampup_min_interval_seconds", "45"))
+        rampup_max_interval = tk.StringVar(value=get_setting("rampup_max_interval_seconds", "180"))
+        rampup_daily_floor = tk.StringVar(value=get_setting("rampup_daily_floor", "5"))
+        internet_status = tk.StringVar(value="Internet: ainda não testada.")
+        start_with_windows = tk.BooleanVar(value=startup.is_startup_enabled())
+        startup_status = "Disponível neste Windows." if startup.is_supported() else "Disponível apenas no Windows."
+
+        theme_options = {"Claro": "light", "Escuro": "dark"}
+        theme_labels = {value: label for label, value in theme_options.items()}
+        theme = tk.StringVar(value=theme_labels.get(get_setting("app_theme", "light"), "Claro"))
+        density_options = {"Compacta": "compact", "Normal": "normal", "Confortável": "comfortable"}
+        density_labels = {value: label for label, value in density_options.items()}
+        density = tk.StringVar(value=density_labels.get(get_setting("ui_density", "normal"), "Normal"))
+        font_size = tk.StringVar(value=get_setting("ui_font_size", "10"))
+
+        section(left, "Geral")
+        self._entry(left, "Nome da empresa", company_name).pack(fill="x", pady=(10, 0))
+        visual_grid = ttk.Frame(left, style="Panel.TFrame")
+        visual_grid.pack(fill="x", pady=(10, 0))
+        theme_holder = ttk.Frame(visual_grid, style="Panel.TFrame")
+        theme_holder.grid(row=0, column=0, sticky="ew", padx=(0, 8))
+        ttk.Label(theme_holder, text="Tema", style="Panel.TLabel").pack(anchor="w", pady=(0, 4))
+        ttk.Combobox(theme_holder, textvariable=theme, values=tuple(theme_options.keys()), state="readonly").pack(fill="x")
+        density_holder = ttk.Frame(visual_grid, style="Panel.TFrame")
+        density_holder.grid(row=0, column=1, sticky="ew")
+        ttk.Label(density_holder, text="Densidade", style="Panel.TLabel").pack(anchor="w", pady=(0, 4))
+        ttk.Combobox(density_holder, textvariable=density, values=tuple(density_options.keys()), state="readonly").pack(fill="x")
+        visual_grid.columnconfigure(0, weight=1)
+        visual_grid.columnconfigure(1, weight=1)
+        self._entry(left, "Tamanho da fonte (9 a 14)", font_size).pack(fill="x", pady=(10, 0))
+
+        license_data = self._load_license()
+        license_key = tk.StringVar(value=str(license_data.get("license_key", "")))
+        license_plan = tk.StringVar(value=str(license_data.get("plan_name", "")))
+        license_until = tk.StringVar(value=str(license_data.get("valid_until", "")))
+        section(left, "Licença")
+        for label, variable in [
+            ("Código da licença", license_key),
+            ("Plano", license_plan),
+            ("Validade", license_until),
+        ]:
+            self._entry(left, label, variable).pack(fill="x", pady=(10, 0))
+
+        section(left, "Envio", "Configurações gerais usadas por campanhas e limites de segurança.")
+        for label, variable in [
+            ("Intervalo global de fallback (segundos)", interval),
+            ("Máximo de envios por dia", daily_limit),
+        ]:
+            self._entry(left, label, variable).pack(fill="x", pady=(10, 0))
+        ttk.Checkbutton(left, text="Impedir envio quando o risco estiver muito alto", variable=block_high_risk).pack(anchor="w", pady=(12, 0))
+        ttk.Checkbutton(left, text="Usar pausas automáticas entre mensagens", variable=smart_send).pack(anchor="w", pady=(8, 0))
+
+        smart_grid = ttk.Frame(left, style="Panel.TFrame")
+        smart_grid.pack(fill="x")
+        for index, (label, variable) in enumerate([
+            ("Espera mínima (s)", smart_min_interval),
+            ("Espera máxima (s)", smart_max_interval),
+            ("Pausa a cada X envios", smart_pause_every),
+            ("Pausa curta mínima (s)", smart_pause_min),
+            ("Pausa curta máxima (s)", smart_pause_max),
+            ("Máximo diário neste modo", smart_daily_limit),
+            ("Tempo máximo seguido (min)", smart_max_session),
+        ]):
+            holder = ttk.Frame(smart_grid, style="Panel.TFrame")
+            holder.grid(row=index // 2, column=index % 2, sticky="ew", padx=(0 if index % 2 == 0 else 8, 0), pady=(10, 0))
+            smart_grid.columnconfigure(index % 2, weight=1)
+            self._entry(holder, label, variable).pack(fill="x")
+
+        section(right, "WhatsApp / Meta / Manual")
+        ttk.Label(
+            right,
+            text="O token é protegido pela DPAPI no Windows e nunca é exibido aqui. Deixe em branco para manter o token atual.",
+            style="Muted.TLabel",
+            wraplength=500,
+        ).pack(anchor="w", pady=(4, 0))
+        token_state = "Token: configurado e oculto." if config.token or get_setting("whatsapp_token_protected", "") else "Token: ainda não configurado."
+        ttk.Label(right, text=token_state, style="Panel.TLabel").pack(anchor="w", pady=(8, 0))
+        internet_panel = ttk.Frame(right, style="Panel.TFrame")
+        internet_panel.pack(fill="x", pady=(10, 0))
+        ttk.Label(internet_panel, textvariable=internet_status, style="Panel.TLabel").pack(side="left")
+        ttk.Button(internet_panel, text="Testar internet", command=lambda: self._update_internet_status(internet_status)).pack(side="right")
+        ttk.Label(right, text="Como o app deve enviar", style="Panel.TLabel").pack(anchor="w", pady=(10, 4))
+        ttk.Combobox(right, textvariable=delivery_mode, values=tuple(delivery_modes.keys()), state="readonly").pack(fill="x")
+        for label, variable in [
+            ("Token da Meta (opcional)", token),
+            ("ID do número no WhatsApp Business", phone_number_id),
+            ("ID da conta empresarial da Meta", business_account_id),
+            ("Webhook", webhook_url),
+            ("Versão da API da Meta", api_version),
+            ("Modelo aprovado padrão", default_template),
+            ("Idioma padrão do modelo", default_language),
+        ]:
+            self._entry(right, label, variable, show="*" if label.startswith("Token") else None).pack(fill="x", pady=(10, 0))
+        ttk.Checkbutton(right, text="Modo teste: registrar sem enviar de verdade", variable=dry_run).pack(anchor="w", pady=(12, 0))
+
+        section(right, "Inicialização com Windows")
+        ttk.Label(right, text=startup_status, style="Muted.TLabel", wraplength=500).pack(anchor="w", pady=(4, 0))
+        startup_check = ttk.Checkbutton(right, text="Começar sozinho quando ligar o computador", variable=start_with_windows)
+        startup_check.pack(anchor="w", pady=(10, 0))
+        if not startup.is_supported():
+            startup_check.configure(state="disabled")
+
+        section(right, "Aquecimento dos números")
+        rampup_grid = ttk.Frame(right, style="Panel.TFrame")
+        rampup_grid.pack(fill="x")
+        for index, (label, variable) in enumerate([
+            ("Espera mínima entre testes (s)", rampup_min_interval),
+            ("Espera máxima entre testes (s)", rampup_max_interval),
+            ("Envios bons para liberar número", rampup_daily_floor),
+        ]):
+            holder = ttk.Frame(rampup_grid, style="Panel.TFrame")
+            holder.grid(row=index // 2, column=index % 2, sticky="ew", padx=(0 if index % 2 == 0 else 8, 0), pady=(10, 0))
+            rampup_grid.columnconfigure(index % 2, weight=1)
+            self._entry(holder, label, variable).pack(fill="x")
+
+        def save() -> None:
+            try:
+                parsed_font_size = min(max(self._positive_int(font_size.get(), "Tamanho da fonte", 9), 9), 14)
+                config_to_save = whatsapp.WhatsAppConfig(
+                    api_version=api_version.get(),
+                    phone_number_id=phone_number_id.get(),
+                    business_account_id=business_account_id.get(),
+                    webhook_url=webhook_url.get(),
+                    default_template=default_template.get(),
+                    default_language=default_language.get(),
+                    delivery_mode=delivery_modes.get(delivery_mode.get(), "official_api"),
+                    dry_run=dry_run.get(),
+                    send_interval_seconds=float(interval.get().replace(",", ".")),
+                    daily_send_limit=int(float(daily_limit.get().replace(",", "."))),
+                )
+                if not self._confirm_settings_save():
+                    return
+                whatsapp.save_config(config_to_save, token.get().strip() or None)
+                set_setting("company_name", company_name.get())
+                set_setting("app_theme", theme_options.get(theme.get(), "light"))
+                set_setting("ui_font_size", str(parsed_font_size))
+                set_setting("ui_density", density_options.get(density.get(), "normal"))
+                set_setting("block_high_risk_campaigns", "1" if block_high_risk.get() else "0")
+                if startup.is_supported():
+                    startup.set_startup_enabled(start_with_windows.get())
+                elif start_with_windows.get():
+                    raise RuntimeError("Inicialização automática está disponível apenas no Windows.")
+                self._save_smart_send_settings(
+                    smart_send.get(),
+                    smart_min_interval.get(),
+                    smart_max_interval.get(),
+                    smart_pause_every.get(),
+                    smart_pause_min.get(),
+                    smart_pause_max.get(),
+                    smart_daily_limit.get(),
+                    smart_max_session.get(),
+                )
+                self._save_rampup_settings(rampup_min_interval.get(), rampup_max_interval.get(), rampup_daily_floor.get())
+                self._save_license(license_key.get(), license_plan.get(), license_until.get())
+            except (ValueError, RuntimeError, whatsapp.WhatsAppAPIError) as exc:
+                messagebox.showerror(APP_TITLE, str(exc))
+                return
+            self._configure_style()
+            messagebox.showinfo(APP_TITLE, "Configurações salvas.")
+            self.show_settings()
+
+        def backup() -> None:
+            destination = filedialog.asksaveasfilename(
+                defaultextension=".sqlite3",
+                filetypes=[("Backup SQLite", "*.sqlite3"), ("Todos", "*.*")],
+                initialfile=f"mezzold-connect-backup-{datetime.now().strftime('%Y%m%d-%H%M')}.sqlite3",
+            )
+            if not destination:
+                return
+            shutil.copy2(DB_PATH, destination)
+            messagebox.showinfo(APP_TITLE, "Backup criado com sucesso.")
+
+        def check_updates() -> None:
+            messagebox.showinfo(APP_TITLE, "Vou abrir a página oficial de releases do projeto no navegador.")
+            self._open_external_link(APP_UPDATES_URL)
+
+        actions = ttk.Frame(right, style="Panel.TFrame")
+        actions.pack(fill="x", pady=(18, 0))
+        for index, (label, command, style_name) in enumerate([
+            ("Salvar configurações", save, "Accent.TButton"),
+            ("Criar backup", backup, "TButton"),
+            ("Verificar atualizações", check_updates, "TButton"),
+            ("Política oficial do WhatsApp", lambda: self._open_external_link(WHATSAPP_POLICY_URL), "TButton"),
+            ("Documentação Cloud API", lambda: self._open_external_link(META_CLOUD_API_URL), "TButton"),
+        ]):
+            button = ttk.Button(actions, text=label, command=command, style=style_name)
+            button.grid(row=index // 2, column=index % 2, sticky="ew", padx=(0 if index % 2 == 0 else 8, 0), pady=(0, 8))
+        actions.columnconfigure(0, weight=1)
+        actions.columnconfigure(1, weight=1)
 
     def _save_smart_send_settings(
         self,
