@@ -42,6 +42,10 @@ class SendResult:
     error_message: str = ""
     action_url: str = ""
     dry_run: bool = False
+    delivery_mode: str = ""
+
+
+VALID_DELIVERY_MODES = {"official_api", "manual_assisted"}
 
 
 def _dpapi_blob(data: bytes):
@@ -181,18 +185,24 @@ class WhatsAppBusinessClient:
         message = str(campaign.get("message") or "")
         media_path = str(campaign.get("media_path") or "")
         category = str(campaign.get("message_category") or "marketing")
+        delivery_mode = self.config.delivery_mode.strip() or "official_api"
 
-        if self.config.delivery_mode == "manual_assisted":
-            return SendResult(
-                status="pendente_manual",
-                action_url=build_click_to_chat_link(phone, message),
-            )
+        if delivery_mode not in VALID_DELIVERY_MODES:
+            raise WhatsAppAPIError(f"Modo de envio desconhecido: {delivery_mode}.")
 
         if self.config.dry_run:
             return SendResult(
                 status="simulado",
                 provider_message_id=f"dryrun-{int(time.time() * 1000)}",
                 dry_run=True,
+                delivery_mode=delivery_mode,
+            )
+
+        if delivery_mode == "manual_assisted":
+            return SendResult(
+                status="pendente_manual",
+                action_url=build_click_to_chat_link(phone, message),
+                delivery_mode=delivery_mode,
             )
 
         if not self.is_configured:
@@ -253,7 +263,7 @@ class WhatsAppBusinessClient:
         messages = response.get("messages") if isinstance(response, dict) else None
         if isinstance(messages, list) and messages:
             provider_id = str(messages[0].get("id", ""))
-        return SendResult(status="enviado", provider_message_id=provider_id)
+        return SendResult(status="enviado", provider_message_id=provider_id, delivery_mode="official_api")
 
     def send_text_message(self, to: str, body: str, preview_url: bool = False) -> SendResult:
         if not body.strip():
@@ -277,7 +287,7 @@ class WhatsAppBusinessClient:
         messages = response.get("messages") if isinstance(response, dict) else None
         if isinstance(messages, list) and messages:
             provider_id = str(messages[0].get("id", ""))
-        return SendResult(status="enviado", provider_message_id=provider_id)
+        return SendResult(status="enviado", provider_message_id=provider_id, delivery_mode="official_api")
 
     def _post_json(self, url: str, payload: dict[str, Any]) -> dict[str, Any]:
         request = urllib.request.Request(

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import os
 import shutil
 import subprocess
@@ -25,6 +26,46 @@ def target_dir() -> Path:
 
 def target_exe_path() -> Path:
     return target_dir() / "Mezzold Connect.exe"
+
+
+def file_sha256(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as file:
+        for chunk in iter(lambda: file.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def replace_executable_safely(source: Path, target: Path) -> None:
+    target.parent.mkdir(parents=True, exist_ok=True)
+    temp_target = target.with_name(f"{target.name}.new")
+    backup_target = target.with_name(f"{target.name}.bak")
+
+    try:
+        temp_target.unlink(missing_ok=True)
+        shutil.copy2(source, temp_target)
+        if file_sha256(source) != file_sha256(temp_target):
+            raise RuntimeError("A copia do executavel falhou na verificacao de integridade.")
+
+        if not target.exists():
+            os.replace(temp_target, target)
+            return
+
+        backup_target.unlink(missing_ok=True)
+        os.replace(target, backup_target)
+        try:
+            os.replace(temp_target, target)
+        except Exception:
+            if backup_target.exists() and not target.exists():
+                os.replace(backup_target, target)
+            raise
+    except PermissionError as exc:
+        raise RuntimeError(
+            "Nao foi possivel substituir o aplicativo. Feche o Mezzold Connect e o envio em segundo plano, "
+            "depois execute o instalador novamente."
+        ) from exc
+    finally:
+        temp_target.unlink(missing_ok=True)
 
 
 def run_powershell(script: str, env: dict[str, str] | None = None) -> None:
@@ -106,7 +147,7 @@ def install(enable_startup: bool, open_after_install: bool) -> Path:
     app_dir = target_dir()
     app_dir.mkdir(parents=True, exist_ok=True)
     target_exe = target_exe_path()
-    shutil.copy2(source, target_exe)
+    replace_executable_safely(source, target_exe)
     write_uninstaller(app_dir)
     create_shortcuts(target_exe)
     set_startup(enable_startup, target_exe)
@@ -126,14 +167,14 @@ class InstallerApp(tk.Tk):
         self.configure(background="#f6f7fb")
         self.startup = tk.BooleanVar(value=True)
         self.open_after = tk.BooleanVar(value=True)
-        self.status = tk.StringVar(value="Pronto para instalar.")
+        self.status = tk.StringVar(value="Pronto para instalar ou atualizar.")
 
         frame = ttk.Frame(self, padding=24)
         frame.pack(fill="both", expand=True)
         ttk.Label(frame, text=APP_NAME, font=("Segoe UI Semibold", 18)).pack(anchor="w")
         ttk.Label(
             frame,
-            text="Instala o aplicativo, cria atalhos e deixa os envios em segundo plano no Windows.",
+            text="Instala ou atualiza o aplicativo, cria atalhos e preserva os dados locais do usuario.",
             wraplength=400,
         ).pack(anchor="w", pady=(8, 18))
         ttk.Label(frame, text=f"Pasta: {target_dir()}", wraplength=400).pack(anchor="w", pady=(0, 14))
@@ -150,7 +191,7 @@ class InstallerApp(tk.Tk):
         ttk.Label(frame, textvariable=self.status).pack(anchor="w", pady=(0, 12))
         actions = ttk.Frame(frame)
         actions.pack(fill="x")
-        ttk.Button(actions, text="Instalar", command=self.install_clicked).pack(side="left")
+        ttk.Button(actions, text="Instalar/Atualizar", command=self.install_clicked).pack(side="left")
         ttk.Button(actions, text="Cancelar", command=self.destroy).pack(side="left", padx=(8, 0))
 
     def install_clicked(self) -> None:
@@ -159,7 +200,7 @@ class InstallerApp(tk.Tk):
             self.update_idletasks()
             target = install(self.startup.get(), self.open_after.get())
             self.status.set(f"Instalado em {target}")
-            messagebox.showinfo(APP_NAME, "Mezzold Connect instalado com sucesso.")
+            messagebox.showinfo(APP_NAME, "Mezzold Connect instalado ou atualizado com sucesso.")
         except Exception as exc:
             self.status.set("Falha na instalacao.")
             messagebox.showerror(APP_NAME, str(exc))

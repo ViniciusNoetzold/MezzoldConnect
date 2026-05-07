@@ -11,6 +11,8 @@ from typing import Any, Iterable
 
 APP_TITLE = "Mezzold Connect"
 APP_VERSION = "1.0.0"
+APP_DOWNLOAD_URL = "https://github.com/ViniciusNoetzold/MezzoldConnect/releases"
+DEFAULT_CONTACT_FOLDER = "Importados"
 
 if getattr(sys, "frozen", False):
     BASE_DIR = Path(sys.executable).resolve().parent
@@ -90,6 +92,23 @@ def initialize_database() -> None:
                 updated_at TEXT NOT NULL
             );
 
+            CREATE TABLE IF NOT EXISTS contact_folders (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                name TEXT NOT NULL UNIQUE COLLATE NOCASE,
+                is_default INTEGER NOT NULL DEFAULT 0,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS contact_folder_members (
+                contact_id INTEGER NOT NULL,
+                folder_id INTEGER NOT NULL,
+                created_at TEXT NOT NULL,
+                PRIMARY KEY (contact_id, folder_id),
+                FOREIGN KEY (contact_id) REFERENCES contacts(id) ON DELETE CASCADE,
+                FOREIGN KEY (folder_id) REFERENCES contact_folders(id) ON DELETE CASCADE
+            );
+
             CREATE TABLE IF NOT EXISTS campaigns (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 name TEXT NOT NULL,
@@ -98,6 +117,9 @@ def initialize_database() -> None:
                 template_name TEXT DEFAULT '',
                 template_language TEXT NOT NULL DEFAULT 'pt_BR',
                 message_category TEXT NOT NULL DEFAULT 'marketing',
+                folder_name TEXT DEFAULT '',
+                delay_min_seconds INTEGER NOT NULL DEFAULT 30,
+                delay_max_seconds INTEGER NOT NULL DEFAULT 45,
                 risk_score INTEGER NOT NULL DEFAULT 0,
                 risk_level TEXT DEFAULT 'pendente',
                 risk_notes TEXT DEFAULT '',
@@ -142,6 +164,13 @@ def initialize_database() -> None:
                 created_at TEXT NOT NULL,
                 FOREIGN KEY (campaign_id) REFERENCES campaigns(id) ON DELETE SET NULL,
                 FOREIGN KEY (contact_id) REFERENCES contacts(id) ON DELETE SET NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS campaign_send_locks (
+                campaign_id INTEGER PRIMARY KEY,
+                owner TEXT NOT NULL,
+                locked_at TEXT NOT NULL,
+                FOREIGN KEY (campaign_id) REFERENCES campaigns(id) ON DELETE CASCADE
             );
 
             CREATE TABLE IF NOT EXISTS whatsapp_numbers (
@@ -217,6 +246,7 @@ def initialize_database() -> None:
 
             CREATE INDEX IF NOT EXISTS idx_contacts_group ON contacts(group_name);
             CREATE INDEX IF NOT EXISTS idx_contacts_opt_in ON contacts(opt_in);
+            CREATE INDEX IF NOT EXISTS idx_contact_folder_members_folder ON contact_folder_members(folder_id);
             CREATE INDEX IF NOT EXISTS idx_logs_created ON message_logs(created_at);
             CREATE INDEX IF NOT EXISTS idx_campaigns_status ON campaigns(status);
             CREATE INDEX IF NOT EXISTS idx_numbers_status ON whatsapp_numbers(status);
@@ -232,12 +262,16 @@ def initialize_database() -> None:
         _ensure_column(conn, "contacts", "last_inbound_at", "TEXT")
         _ensure_column(conn, "contacts", "consent_notes", "TEXT DEFAULT ''")
         _ensure_column(conn, "campaigns", "message_category", "TEXT NOT NULL DEFAULT 'marketing'")
+        _ensure_column(conn, "campaigns", "folder_name", "TEXT DEFAULT ''")
+        _ensure_column(conn, "campaigns", "delay_min_seconds", "INTEGER NOT NULL DEFAULT 30")
+        _ensure_column(conn, "campaigns", "delay_max_seconds", "INTEGER NOT NULL DEFAULT 45")
         _ensure_column(conn, "campaigns", "risk_score", "INTEGER NOT NULL DEFAULT 0")
         _ensure_column(conn, "campaigns", "risk_level", "TEXT DEFAULT 'pendente'")
         _ensure_column(conn, "campaigns", "risk_notes", "TEXT DEFAULT ''")
         _ensure_column(conn, "message_logs", "action_url", "TEXT DEFAULT ''")
         _ensure_column(conn, "message_logs", "message_body", "TEXT DEFAULT ''")
         _ensure_column(conn, "message_logs", "media_path", "TEXT DEFAULT ''")
+        _migrate_contact_folders(conn)
 
         defaults = {
             "whatsapp_api_version": "v24.0",
@@ -264,6 +298,12 @@ def initialize_database() -> None:
             "rampup_daily_floor": "5",
             "block_high_risk_campaigns": "1",
             "company_name": "Mezzold",
+            "app_theme": "light",
+            "ui_font_size": "10",
+            "ui_density": "normal",
+            "app_update_manifest_url": "",
+            "app_update_download_url": APP_DOWNLOAD_URL,
+            "app_update_channel": "stable",
         }
         for key, value in defaults.items():
             conn.execute(
@@ -273,6 +313,17 @@ def initialize_database() -> None:
                 """,
                 (key, value, now_text()),
             )
+
+        conn.execute(
+            """
+            INSERT INTO settings (key, value, updated_at)
+            VALUES ('app_current_version', ?, ?)
+            ON CONFLICT(key) DO UPDATE SET
+                value = excluded.value,
+                updated_at = excluded.updated_at
+            """,
+            (APP_VERSION, now_text()),
+        )
 
         conn.execute(
             """
@@ -289,6 +340,66 @@ def _ensure_column(conn: sqlite3.Connection, table: str, column: str, definition
     existing = {str(row["name"]) for row in rows}
     if column not in existing:
         conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {definition}")
+
+
+def _migrate_contact_folders(conn: sqlite3.Connection) -> None:
+    timestamp = now_text()
+    conn.execute(
+        """
+        INSERT OR IGNORE INTO contact_folders (name, is_default, created_at, updated_at)
+        VALUES (?, 1, ?, ?)
+        """,
+        (DEFAULT_CONTACT_FOLDER, timestamp, timestamp),
+    )
+    conn.execute(
+        """
+        UPDATE contact_folders
+        SET is_default = CASE WHEN name = ? THEN 1 ELSE 0 END,
+            updated_at = CASE WHEN name = ? THEN ? ELSE updated_at END
+        """,
+        (DEFAULT_CONTACT_FOLDER, DEFAULT_CONTACT_FOLDER, timestamp),
+    )
+    conn.execute(
+        """
+        UPDATE contacts
+        SET group_name = ?
+        WHERE COALESCE(TRIM(group_name), '') = ''
+        """,
+        (DEFAULT_CONTACT_FOLDER,),
+    )
+    conn.execute(
+        """
+        INSERT OR IGNORE INTO contact_folders (name, is_default, created_at, updated_at)
+        SELECT DISTINCT TRIM(group_name), 0, ?, ?
+        FROM contacts
+        WHERE COALESCE(TRIM(group_name), '') <> ''
+        """,
+        (timestamp, timestamp),
+    )
+    conn.execute(
+        """
+        INSERT OR IGNORE INTO contact_folder_members (contact_id, folder_id, created_at)
+        SELECT contacts.id, contact_folders.id, ?
+        FROM contacts
+        JOIN contact_folders ON contact_folders.name = TRIM(contacts.group_name)
+        WHERE COALESCE(TRIM(contacts.group_name), '') <> ''
+        """,
+        (timestamp,),
+    )
+    conn.execute(
+        """
+        INSERT OR IGNORE INTO contact_folder_members (contact_id, folder_id, created_at)
+        SELECT contacts.id, contact_folders.id, ?
+        FROM contacts
+        JOIN contact_folders ON contact_folders.name = ?
+        WHERE NOT EXISTS (
+            SELECT 1
+            FROM contact_folder_members
+            WHERE contact_folder_members.contact_id = contacts.id
+        )
+        """,
+        (timestamp, DEFAULT_CONTACT_FOLDER),
+    )
 
 
 def get_setting(key: str, default: str = "") -> str:
