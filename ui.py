@@ -1018,6 +1018,8 @@ class MezzoldApp(tk.Tk):
         ttk.Button(panel, text="Importar clientes", style="Accent.TButton", command=do_import).pack(anchor="w")
 
     def show_create_campaign(self) -> None:
+        return self._show_create_campaign_by_folder()
+
         frame = self._screen("Nova campanha")
         form = ttk.Frame(frame, style="Panel.TFrame", padding=16)
         form.pack(side="left", fill="both", expand=True)
@@ -1125,6 +1127,172 @@ class MezzoldApp(tk.Tk):
         ttk.Button(actions, text="Marcar todos", command=select_all).pack(side="left")
         ttk.Button(actions, text="Salvar campanha", style="Accent.TButton", command=create).pack(side="right")
         refresh_contacts()
+
+    def _show_create_campaign_by_folder(self) -> None:
+        frame = self._screen("Nova campanha")
+        form = ttk.Frame(frame, style="Panel.TFrame", padding=16)
+        form.pack(side="left", fill="both", expand=True)
+        name = tk.StringVar()
+        template_name = tk.StringVar(value=whatsapp.load_config().default_template)
+        template_language = tk.StringVar(value=whatsapp.load_config().default_language)
+        message_categories = {
+            "Marketing": "marketing",
+            "Aviso ou servico": "utility",
+            "Codigo de acesso": "authentication",
+            "Atendimento": "service",
+        }
+        message_category = tk.StringVar(value="Marketing")
+        media_path = tk.StringVar()
+
+        self._entry(form, "Nome para identificar esta campanha", name).pack(fill="x", pady=(0, 10))
+        category_frame = ttk.Frame(form, style="Panel.TFrame")
+        category_frame.pack(fill="x", pady=(0, 10))
+        ttk.Label(category_frame, text="Tipo de mensagem", style="Panel.TLabel").pack(anchor="w", pady=(0, 4))
+        ttk.Combobox(
+            category_frame,
+            textvariable=message_category,
+            values=tuple(message_categories.keys()),
+            state="readonly",
+        ).pack(fill="x")
+        template_row = ttk.Frame(form, style="Panel.TFrame")
+        template_row.pack(fill="x", pady=(0, 10))
+        self._entry(template_row, "Nome do modelo aprovado na Meta", template_name).pack(side="left", fill="x", expand=True, padx=(0, 8))
+        self._entry(template_row, "Idioma", template_language).pack(side="left", fill="x")
+
+        ttk.Label(form, text="Mensagem principal", style="Panel.TLabel").pack(anchor="w")
+        message = tk.Text(form, height=8, wrap="word")
+        message.pack(fill="both", expand=True, pady=(4, 10))
+
+        ttk.Label(form, text="Outras versoes da mensagem", style="Panel.TLabel").pack(anchor="w")
+        message_variants = tk.Text(form, height=5, wrap="word")
+        message_variants.pack(fill="both", expand=True, pady=(4, 10))
+
+        media_row = ttk.Frame(form, style="Panel.TFrame")
+        media_row.pack(fill="x", pady=(0, 12))
+        ttk.Entry(media_row, textvariable=media_path).pack(side="left", fill="x", expand=True)
+        ttk.Button(
+            media_row,
+            text="Imagem, arquivo ou link",
+            command=lambda: media_path.set(filedialog.askopenfilename() or media_path.get()),
+        ).pack(side="left", padx=(8, 0))
+
+        ttk.Label(form, text="Outras imagens, arquivos ou links", style="Panel.TLabel").pack(anchor="w")
+        media_variants = tk.Text(form, height=3, wrap="word")
+        media_variants.pack(fill="x", pady=(4, 10))
+
+        folder_panel = ttk.Frame(frame, style="Panel.TFrame", padding=16)
+        folder_panel.pack(side="right", fill="y", padx=(16, 0))
+        ttk.Label(folder_panel, text="Pasta de contatos", style="Panel.TLabel", font=("Segoe UI Semibold", 11)).pack(anchor="w")
+        selected_folder = tk.StringVar()
+        folder_combo = ttk.Combobox(folder_panel, textvariable=selected_folder, values=contacts.list_groups(), state="readonly", width=34)
+        folder_combo.pack(fill="x", pady=(8, 10))
+
+        folder_stats = tk.StringVar(value="Escolha uma pasta para ver os contatos.")
+        ttk.Label(folder_panel, textvariable=folder_stats, style="Panel.TLabel", wraplength=320, justify="left").pack(anchor="w", pady=(0, 12))
+
+        folder_actions = ttk.Frame(folder_panel, style="Panel.TFrame")
+        folder_actions.pack(fill="x", pady=(0, 12))
+        new_folder_button = ttk.Button(folder_actions, text="Nova pasta")
+        new_folder_button.pack(side="left")
+        import_button = ttk.Button(folder_actions, text="Importar contatos")
+        import_button.pack(side="left", padx=(8, 0))
+
+        save_button = ttk.Button(folder_panel, text="Salvar campanha", style="Accent.TButton")
+        save_button.pack(fill="x", pady=(10, 0))
+
+        def folder_values() -> list[str]:
+            values = contacts.list_groups()
+            if DEFAULT_CONTACT_FOLDER not in values:
+                values.insert(0, DEFAULT_CONTACT_FOLDER)
+            return values
+
+        def folder_contacts(folder_name: str) -> list[dict[str, object]]:
+            return contacts.list_contacts(group_name=folder_name)
+
+        def eligible_contacts(folder_name: str) -> list[dict[str, object]]:
+            return [
+                item
+                for item in folder_contacts(folder_name)
+                if item.get("opt_in") and not item.get("blacklisted")
+            ]
+
+        def refresh_folder_stats() -> None:
+            folder_name = selected_folder.get().strip()
+            if not folder_name:
+                folder_stats.set("Escolha uma pasta para ver os contatos.")
+                return
+            items = folder_contacts(folder_name)
+            opt_in_count = sum(1 for item in items if item.get("opt_in") and not item.get("blacklisted"))
+            blacklist_count = sum(1 for item in items if item.get("blacklisted"))
+            used_count = len(contacts.list_used_contacts(folder_name=folder_name))
+            folder_stats.set(
+                f"Total de contatos: {len(items)}\n"
+                f"Com opt-in: {opt_in_count}\n"
+                f"Ja usados/enviados: {used_count}\n"
+                f"Blacklist: {blacklist_count}"
+            )
+
+        def refresh_folders(select_name: str = "") -> None:
+            values = folder_values()
+            folder_combo.configure(values=values)
+            if select_name.strip():
+                selected_folder.set(select_name.strip())
+            elif not selected_folder.get().strip() and values:
+                selected_folder.set(values[0])
+            refresh_folder_stats()
+
+        def create_folder() -> None:
+            folder_name = simpledialog.askstring(APP_TITLE, "Nome da nova pasta:", parent=self)
+            if not folder_name:
+                return
+            try:
+                contacts.create_folder(folder_name)
+            except contacts.ContactError as exc:
+                messagebox.showerror(APP_TITLE, str(exc))
+                return
+            refresh_folders(folder_name)
+
+        def open_import() -> None:
+            self.show_import_contacts(selected_folder.get().strip() or DEFAULT_CONTACT_FOLDER)
+
+        def create() -> None:
+            folder_name = selected_folder.get().strip()
+            if not folder_name:
+                messagebox.showerror(APP_TITLE, "Escolha uma pasta de contatos.")
+                return
+            items = folder_contacts(folder_name)
+            if not items:
+                messagebox.showerror(APP_TITLE, "A pasta selecionada esta vazia.")
+                return
+            selected = [int(item["id"]) for item in eligible_contacts(folder_name)]
+            if not selected:
+                messagebox.showerror(APP_TITLE, "A pasta selecionada nao tem contatos com opt-in liberados.")
+                return
+            try:
+                campaign_id = campaigns.create_campaign(
+                    name=name.get(),
+                    message=message.get("1.0", "end").strip(),
+                    contact_ids=selected,
+                    media_path=media_path.get(),
+                    template_name=template_name.get(),
+                    template_language=template_language.get(),
+                    message_category=message_categories.get(message_category.get(), "marketing"),
+                    message_variants=parse_variants(message_variants.get("1.0", "end")),
+                    media_variants=parse_variants(media_variants.get("1.0", "end")),
+                    folder_name=folder_name,
+                )
+            except campaigns.CampaignError as exc:
+                messagebox.showerror(APP_TITLE, str(exc))
+                return
+            messagebox.showinfo(APP_TITLE, f"Campanha salva para a pasta '{folder_name}'.")
+            self._set_status(f"Campanha #{campaign_id} criada com a pasta '{folder_name}'.")
+            self.show_schedule()
+
+        folder_combo.bind("<<ComboboxSelected>>", lambda _event: refresh_folder_stats())
+        new_folder_button.configure(command=create_folder)
+        import_button.configure(command=open_import)
+        save_button.configure(command=create)
+        refresh_folders()
 
     def show_schedule(self) -> None:
         frame = self._screen("Agenda de envios")

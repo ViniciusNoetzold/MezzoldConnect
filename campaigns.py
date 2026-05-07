@@ -66,9 +66,11 @@ def create_campaign(
     message_variants: list[str] | None = None,
     media_variants: list[str] | None = None,
     scheduled_at: str | None = None,
+    folder_name: str = "",
 ) -> int:
     name = name.strip()
     message = message.strip()
+    folder_name = folder_name.strip()
     contact_ids = sorted(set(int(contact_id) for contact_id in contact_ids))
     if not name:
         raise CampaignError("Dê um nome para a campanha.")
@@ -86,8 +88,8 @@ def create_campaign(
             """
             INSERT INTO campaigns
                 (name, message, media_path, template_name, template_language,
-                 message_category, status, scheduled_at, created_at, updated_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                 message_category, folder_name, status, scheduled_at, created_at, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 name,
@@ -96,6 +98,7 @@ def create_campaign(
                 template_name.strip(),
                 template_language.strip() or "pt_BR",
                 message_category.strip() or "marketing",
+                folder_name,
                 status,
                 scheduled_at,
                 timestamp,
