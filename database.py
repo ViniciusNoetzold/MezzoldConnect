@@ -116,6 +116,7 @@ def initialize_database() -> None:
                 template_name TEXT DEFAULT '',
                 template_language TEXT NOT NULL DEFAULT 'pt_BR',
                 message_category TEXT NOT NULL DEFAULT 'marketing',
+                folder_name TEXT DEFAULT '',
                 risk_score INTEGER NOT NULL DEFAULT 0,
                 risk_level TEXT DEFAULT 'pendente',
                 risk_notes TEXT DEFAULT '',
@@ -258,6 +259,7 @@ def initialize_database() -> None:
         _ensure_column(conn, "contacts", "last_inbound_at", "TEXT")
         _ensure_column(conn, "contacts", "consent_notes", "TEXT DEFAULT ''")
         _ensure_column(conn, "campaigns", "message_category", "TEXT NOT NULL DEFAULT 'marketing'")
+        _ensure_column(conn, "campaigns", "folder_name", "TEXT DEFAULT ''")
         _ensure_column(conn, "campaigns", "risk_score", "INTEGER NOT NULL DEFAULT 0")
         _ensure_column(conn, "campaigns", "risk_level", "TEXT DEFAULT 'pendente'")
         _ensure_column(conn, "campaigns", "risk_notes", "TEXT DEFAULT ''")
