@@ -5,9 +5,16 @@ $distExe = Join-Path $root "dist\Mezzold Connect.exe"
 $targetName = Join-Path $PSScriptRoot "Mezzold Connect Setup.exe"
 $installerSource = Join-Path $PSScriptRoot "installer_app.py"
 $workPath = Join-Path $root "build\Mezzold Connect Setup"
+$buildScript = Join-Path $root "build.ps1"
+
+Write-Host "Gerando executavel mais recente do aplicativo..."
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File $buildScript
+if ($LASTEXITCODE -ne 0) {
+    throw "Falha ao gerar o executavel principal."
+}
 
 if (!(Test-Path $distExe)) {
-    throw "Build the desktop executable first: powershell -ExecutionPolicy Bypass -File .\build.ps1"
+    throw "Executavel principal nao encontrado apos o build: $distExe"
 }
 
 Remove-Item -LiteralPath $targetName -Force -ErrorAction SilentlyContinue
