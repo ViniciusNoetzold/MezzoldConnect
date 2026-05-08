@@ -337,5 +337,109 @@ class DesktopSmokeTests(unittest.TestCase):
             archive.writestr("xl/worksheets/sheet1.xml", sheet_xml)
 
 
+class RBACTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls) -> None:
+        cls.temp_root = Path(tempfile.mkdtemp(prefix="mezzold-rbac-"))
+        cls.data_dir = cls.temp_root / "data"
+        cls.db_path = cls.data_dir / "mezzold_rbac_test.sqlite3"
+        os.environ["MEZZOLD_DATA_DIR"] = str(cls.data_dir)
+        os.environ["MEZZOLD_DB_PATH"] = str(cls.db_path)
+        for mod in ("database", "auth"):
+            sys.modules.pop(mod, None)
+        cls.db_mod = importlib.import_module("database")
+        cls.auth_mod = importlib.import_module("auth")
+        cls.ui_mod = importlib.import_module("ui")
+        cls.settings_mod = importlib.import_module("screens.settings")
+
+    @classmethod
+    def tearDownClass(cls) -> None:
+        shutil.rmtree(cls.temp_root, ignore_errors=True)
+
+    def setUp(self) -> None:
+        if self.db_path.exists():
+            self.db_path.unlink()
+        self.db_mod.initialize_database()
+
+    def test_first_user_becomes_admin_with_forced_password_change(self) -> None:
+        user = self.auth_mod.create_user("superadmin", "senha1234")
+        self.assertEqual(user.role, self.auth_mod.ROLE_ADMIN)
+        self.assertTrue(user.must_change_password)
+
+    def test_create_user_with_explicit_role(self) -> None:
+        self.auth_mod.create_user("admin0", "senha1234", role=self.auth_mod.ROLE_ADMIN)
+        equipe = self.auth_mod.create_user("eq1", "senha1234", role=self.auth_mod.ROLE_EQUIPE)
+        cliente = self.auth_mod.create_user("cl1", "senha1234", role=self.auth_mod.ROLE_CLIENTE)
+        self.assertEqual(equipe.role, self.auth_mod.ROLE_EQUIPE)
+        self.assertEqual(cliente.role, self.auth_mod.ROLE_CLIENTE)
+
+    def test_authenticate_returns_correct_role_and_blocks_inactive(self) -> None:
+        self.auth_mod.create_user("admin0", "senha1234", role=self.auth_mod.ROLE_ADMIN)
+        eq = self.auth_mod.create_user("eq1", "senha1234", role=self.auth_mod.ROLE_EQUIPE)
+        self.auth_mod.deactivate_user(eq.id)
+        result = self.auth_mod.authenticate("eq1", "senha1234")
+        self.assertIsNone(result, "Inactive user must not authenticate")
+        adm = self.auth_mod.authenticate("admin0", "senha1234")
+        self.assertIsNotNone(adm)
+        self.assertEqual(adm.role, self.auth_mod.ROLE_ADMIN)
+
+    def test_password_change_clears_must_change_flag(self) -> None:
+        user = self.auth_mod.create_user("changer", "OldPass1!", must_change_password=True)
+        self.assertTrue(user.must_change_password)
+        self.auth_mod.change_password(user.id, "OldPass1!", "NewPass2!")
+        updated = self.auth_mod.get_user(user.id)
+        self.assertIsNotNone(updated)
+        self.assertFalse(updated.must_change_password)
+
+    def test_reset_password_sets_must_change(self) -> None:
+        self.auth_mod.create_user("admin0", "senha1234", role=self.auth_mod.ROLE_ADMIN)
+        user = self.auth_mod.create_user("target", "OldPass1!", must_change_password=False)
+        self.auth_mod.reset_user_password(user.id, "TempPass1!")
+        updated = self.auth_mod.get_user(user.id)
+        self.assertIsNotNone(updated)
+        self.assertTrue(updated.must_change_password)
+
+    def test_update_role_and_list_users(self) -> None:
+        u = self.auth_mod.create_user("eq1", "senha1234", role=self.auth_mod.ROLE_EQUIPE)
+        self.auth_mod.update_user_role(u.id, self.auth_mod.ROLE_ADMIN)
+        listing = self.auth_mod.list_users()
+        match = next((item for item in listing if item["username"] == "eq1"), None)
+        self.assertIsNotNone(match)
+        self.assertEqual(match["role"], self.auth_mod.ROLE_ADMIN)
+
+    def test_sidebar_labels_for_cliente_excludes_advanced(self) -> None:
+        labels = self.ui_mod.sidebar_labels_for_role(self.auth_mod.ROLE_CLIENTE)
+        self.assertIn("Nova campanha", labels)
+        self.assertNotIn("Aquecer números", labels)
+        self.assertNotIn("Gerenciar usuários", labels)
+
+    def test_sidebar_labels_for_equipe_includes_warmup(self) -> None:
+        labels = self.ui_mod.sidebar_labels_for_role(self.auth_mod.ROLE_EQUIPE)
+        self.assertIn("Nova campanha", labels)
+        self.assertIn("Aquecer números", labels)
+        self.assertNotIn("Gerenciar usuários", labels)
+
+    def test_sidebar_labels_for_admin_includes_all(self) -> None:
+        labels = self.ui_mod.sidebar_labels_for_role(self.auth_mod.ROLE_ADMIN)
+        self.assertIn("Nova campanha", labels)
+        self.assertIn("Aquecer números", labels)
+        self.assertIn("Gerenciar usuários", labels)
+
+    def test_settings_flags_cliente_hides_advanced(self) -> None:
+        flags = self.settings_mod.settings_flags_for_role(self.auth_mod.ROLE_CLIENTE)
+        self.assertFalse(flags["advanced"])
+        self.assertFalse(flags["technical"])
+
+    def test_settings_flags_equipe_shows_advanced(self) -> None:
+        flags = self.settings_mod.settings_flags_for_role(self.auth_mod.ROLE_EQUIPE)
+        self.assertTrue(flags["advanced"])
+        self.assertTrue(flags["technical"])
+
+    def test_settings_flags_admin_shows_advanced(self) -> None:
+        flags = self.settings_mod.settings_flags_for_role(self.auth_mod.ROLE_ADMIN)
+        self.assertTrue(flags["advanced"])
+        self.assertTrue(flags["technical"])
+
+
 if __name__ == "__main__":
-    unittest.main()
+    unittest.main()
