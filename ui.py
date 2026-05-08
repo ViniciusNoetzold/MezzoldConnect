@@ -50,10 +50,35 @@ STATUS_LABELS = {
     "safe": "Baixo",
 }
 
+ROLE_LABELS = {
+    auth.ROLE_CLIENTE: "Cliente",
+    auth.ROLE_EQUIPE: "Equipe",
+    auth.ROLE_ADMIN: "Administrador",
+}
+
 
 def friendly_status(value: object) -> str:
     text = str(value or "").strip()
     return STATUS_LABELS.get(text, text)
+
+
+def sidebar_labels_for_role(role: str) -> list[str]:
+    normalized = str(role or "").strip().lower()
+    base = [
+        "Início",
+        "Clientes",
+        "Importar clientes",
+        "Nova campanha",
+        "Agenda de envios",
+        "Conferir risco",
+        "Histórico",
+        "Configurações",
+    ]
+    if normalized in (auth.ROLE_EQUIPE, auth.ROLE_ADMIN):
+        base.insert(5, "Aquecer números")
+    if normalized == auth.ROLE_ADMIN:
+        base.append("Gerenciar usuários")
+    return base
 
 
 class MezzoldApp(SettingsScreenMixin, tk.Tk):
@@ -149,6 +174,10 @@ class MezzoldApp(SettingsScreenMixin, tk.Tk):
                 messagebox.showerror(APP_TITLE, "Usuário ou senha não conferem.")
                 return
             self.current_user = user
+            if user.must_change_password:
+                if not self._force_change_password(user, password.get()):
+                    self.current_user = None
+                    return
             self.show_main()
 
         def do_create() -> None:
@@ -161,7 +190,10 @@ class MezzoldApp(SettingsScreenMixin, tk.Tk):
                 messagebox.showerror(APP_TITLE, str(exc))
                 return
             self.current_user = user
-            messagebox.showinfo(APP_TITLE, "Acesso criado com sucesso.")
+            if user.role == auth.ROLE_ADMIN and user.must_change_password:
+                messagebox.showinfo(APP_TITLE, "Primeiro administrador criado. Troque a senha no primeiro login.")
+            else:
+                messagebox.showinfo(APP_TITLE, "Acesso criado com sucesso.")
             self.show_main()
 
         actions = ttk.Frame(panel, style="Panel.TFrame")
@@ -188,19 +220,29 @@ class MezzoldApp(SettingsScreenMixin, tk.Tk):
             text=f"{self.current_user.username if self.current_user else ''}",
             foreground="#cbd5e1",
             background="#1f2937",
+        ).pack(anchor="w", pady=(0, 4))
+        ttk.Label(
+            sidebar,
+            text=f"Perfil: {self._role_label()}",
+            foreground="#94a3b8",
+            background="#1f2937",
         ).pack(anchor="w", pady=(0, 18))
 
-        buttons = [
+        buttons: list[tuple[str, object]] = [
             ("Início", self.show_dashboard),
             ("Clientes", self.show_contacts),
             ("Importar clientes", self.show_import_contacts),
             ("Nova campanha", self.show_create_campaign),
             ("Agenda de envios", self.show_schedule),
-            ("Aquecer números", self.show_number_health),
             ("Conferir risco", self.show_risk),
             ("Histórico", self.show_history),
             ("Configurações", self.show_settings),
         ]
+        if self._has_role(auth.ROLE_EQUIPE):
+            buttons.insert(5, ("Aquecer números", self.show_number_health))
+
+        if self._is_admin():
+            buttons.append(("Gerenciar usuários", self.show_manage_users))
         for label, command in buttons:
             ttk.Button(sidebar, text=label, style="Sidebar.TButton", command=command).pack(fill="x", pady=3)
 
@@ -255,6 +297,75 @@ class MezzoldApp(SettingsScreenMixin, tk.Tk):
 
     def _set_status(self, text: str) -> None:
         self.status_var.set(text)
+
+    def _current_role(self) -> str:
+        if not self.current_user:
+            return auth.ROLE_CLIENTE
+        return str(self.current_user.role or auth.ROLE_CLIENTE)
+
+    def _role_label(self) -> str:
+        return ROLE_LABELS.get(self._current_role(), "Cliente")
+
+    def _has_role(self, role: str) -> bool:
+        current = self._current_role()
+        if current == auth.ROLE_ADMIN:
+            return True
+        if role == auth.ROLE_CLIENTE:
+            return True
+        if role == auth.ROLE_EQUIPE:
+            return current == auth.ROLE_EQUIPE
+        return current == role
+
+    def _is_admin(self) -> bool:
+        return self._current_role() == auth.ROLE_ADMIN
+
+    def _require_admin(self) -> bool:
+        if self._is_admin():
+            return True
+        messagebox.showerror(APP_TITLE, "Apenas administrador pode acessar esta área.")
+        return False
+
+    def _force_change_password(self, user: auth.User, current_password: str) -> bool:
+        dialog = tk.Toplevel(self)
+        dialog.title("Trocar senha obrigatória")
+        dialog.transient(self)
+        dialog.grab_set()
+        dialog.resizable(False, False)
+
+        new_password = tk.StringVar()
+        confirm_password = tk.StringVar()
+        result = {"ok": False}
+
+        panel = ttk.Frame(dialog, padding=18)
+        panel.pack(fill="both", expand=True)
+        ttk.Label(panel, text="Troca de senha obrigatória", font=("Segoe UI Semibold", 12)).pack(anchor="w")
+        ttk.Label(panel, text="Defina uma nova senha para continuar.", wraplength=360).pack(anchor="w", pady=(8, 10))
+        self._entry(panel, "Nova senha", new_password, show="*").pack(fill="x", pady=(0, 10))
+        self._entry(panel, "Confirmar nova senha", confirm_password, show="*").pack(fill="x", pady=(0, 14))
+
+        def confirm() -> None:
+            if new_password.get() != confirm_password.get():
+                messagebox.showerror(APP_TITLE, "As senhas não conferem.", parent=dialog)
+                return
+            try:
+                auth.change_password(user.id, current_password, new_password.get())
+            except auth.AuthError as exc:
+                messagebox.showerror(APP_TITLE, str(exc), parent=dialog)
+                return
+            updated_user = auth.get_user(user.id)
+            if updated_user:
+                self.current_user = updated_user
+            result["ok"] = True
+            dialog.destroy()
+
+        buttons = ttk.Frame(panel)
+        buttons.pack(fill="x")
+        ttk.Button(buttons, text="Sair", command=dialog.destroy).pack(side="right")
+        ttk.Button(buttons, text="Salvar nova senha", style="Accent.TButton", command=confirm).pack(side="right", padx=(0, 8))
+
+        dialog.bind("<Return>", lambda _event: confirm())
+        dialog.wait_window()
+        return bool(result["ok"])
 
     def show_dashboard(self) -> None:
         frame = self._screen("Início")
@@ -2080,6 +2191,9 @@ class MezzoldApp(SettingsScreenMixin, tk.Tk):
     def show_number_health(self) -> None:
         frame = self._screen("Aquecimento dos números")
         stats = warmup.dashboard_stats()
+        if not self._has_role(auth.ROLE_EQUIPE):
+            messagebox.showerror(APP_TITLE, "Acesso restrito para Equipe ou Administrador.")
+            return
         metrics = ttk.Frame(frame)
         metrics.pack(fill="x", pady=(0, 12))
         for label, value in [
@@ -2344,6 +2458,140 @@ class MezzoldApp(SettingsScreenMixin, tk.Tk):
         ttk.Button(actions, text="Atualizar", command=refresh).grid(row=2, column=1, sticky="ew", padx=(8, 0))
         actions.columnconfigure(0, weight=1)
         actions.columnconfigure(1, weight=1)
+        refresh()
+
+    def show_manage_users(self) -> None:
+        if not self._require_admin():
+            return
+        frame = self._screen("Gerenciar usuários")
+        top = ttk.Frame(frame)
+        top.pack(fill="x", pady=(0, 10))
+        ttk.Label(top, text="Administração de acessos", style="Muted.TLabel").pack(anchor="w")
+
+        columns = ("id", "username", "role", "active", "must_change", "last_login")
+        tree = ttk.Treeview(frame, columns=columns, show="headings", selectmode="browse", height=12)
+        for column, heading, width in [
+            ("id", "ID", 70),
+            ("username", "Usuário", 210),
+            ("role", "Perfil", 120),
+            ("active", "Ativo", 80),
+            ("must_change", "Troca obrigatória", 140),
+            ("last_login", "Último login", 200),
+        ]:
+            tree.heading(column, text=heading)
+            tree.column(column, width=width, anchor="w")
+        tree.pack(fill="both", expand=True)
+
+        form = ttk.Frame(frame, style="Panel.TFrame", padding=14)
+        form.pack(fill="x", pady=(12, 0))
+        selected_user_id = tk.IntVar(value=0)
+        username = tk.StringVar()
+        password = tk.StringVar()
+        role = tk.StringVar(value=auth.ROLE_CLIENTE)
+        active = tk.BooleanVar(value=True)
+
+        self._entry(form, "Usuário", username).grid(row=0, column=0, sticky="ew", padx=(0, 8))
+        self._entry(form, "Senha", password, show="*").grid(row=0, column=1, sticky="ew", padx=(0, 8))
+
+        role_holder = ttk.Frame(form, style="Panel.TFrame")
+        role_holder.grid(row=0, column=2, sticky="ew")
+        ttk.Label(role_holder, text="Perfil", style="Panel.TLabel").pack(anchor="w", pady=(0, 4))
+        ttk.Combobox(
+            role_holder,
+            textvariable=role,
+            values=(auth.ROLE_CLIENTE, auth.ROLE_EQUIPE, auth.ROLE_ADMIN),
+            state="readonly",
+        ).pack(fill="x")
+
+        ttk.Checkbutton(form, text="Usuário ativo", variable=active).grid(row=1, column=0, sticky="w", pady=(10, 0))
+
+        def refresh() -> None:
+            tree.delete(*tree.get_children())
+            for item in auth.list_users():
+                tree.insert(
+                    "",
+                    "end",
+                    values=(
+                        item["id"],
+                        item["username"],
+                        ROLE_LABELS.get(str(item["role"]), str(item["role"])),
+                        "Sim" if item["is_active"] else "Não",
+                        "Sim" if item["must_change_password"] else "Não",
+                        item.get("last_login_at") or "",
+                    ),
+                )
+
+        def selected_id() -> int | None:
+            if not tree.selection():
+                messagebox.showwarning(APP_TITLE, "Escolha um usuário primeiro.")
+                return None
+            return int(tree.item(tree.selection()[0], "values")[0])
+
+        def on_select(_event: object) -> None:
+            user_id = selected_id()
+            if not user_id:
+                return
+            users = auth.list_users()
+            current = next((item for item in users if int(item["id"]) == user_id), None)
+            if not current:
+                return
+            selected_user_id.set(user_id)
+            username.set(str(current["username"]))
+            role.set(str(current["role"]))
+            active.set(bool(current["is_active"]))
+            password.set("")
+
+        def create_user() -> None:
+            try:
+                auth.create_user(
+                    username.get(),
+                    password.get(),
+                    role=role.get(),
+                    must_change_password=True,
+                    is_active=active.get(),
+                )
+            except auth.AuthError as exc:
+                messagebox.showerror(APP_TITLE, str(exc))
+                return
+            refresh()
+            self._set_status("Usuário criado com sucesso.")
+
+        def save_profile() -> None:
+            user_id = selected_id()
+            if not user_id:
+                return
+            auth.update_user_role(user_id, role.get())
+            if active.get():
+                auth.activate_user(user_id)
+            else:
+                auth.deactivate_user(user_id)
+            refresh()
+            self._set_status("Perfil atualizado.")
+
+        def reset_password() -> None:
+            user_id = selected_id()
+            if not user_id:
+                return
+            try:
+                auth.reset_user_password(user_id, password.get(), must_change_password=True)
+            except auth.AuthError as exc:
+                messagebox.showerror(APP_TITLE, str(exc))
+                return
+            password.set("")
+            refresh()
+            self._set_status("Senha redefinida com troca obrigatória no próximo login.")
+
+        tree.bind("<<TreeviewSelect>>", on_select)
+        actions = ttk.Frame(form, style="Panel.TFrame")
+        actions.grid(row=1, column=1, columnspan=2, sticky="e", pady=(10, 0))
+        ttk.Button(actions, text="Criar usuário", style="Accent.TButton", command=create_user).pack(side="left")
+        ttk.Button(actions, text="Salvar perfil", command=save_profile).pack(side="left", padx=(8, 0))
+        ttk.Button(actions, text="Redefinir senha", command=reset_password).pack(side="left", padx=(8, 0))
+        ttk.Button(actions, text="Atualizar lista", command=refresh).pack(side="left", padx=(8, 0))
+
+        form.columnconfigure(0, weight=1)
+        form.columnconfigure(1, weight=1)
+        form.columnconfigure(2, weight=1)
         refresh()
 
     def _campaign_tree(self, parent: tk.Widget) -> ttk.Treeview:
