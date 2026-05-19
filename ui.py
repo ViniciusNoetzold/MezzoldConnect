@@ -199,6 +199,7 @@ class MezzoldApp(SettingsScreenMixin, tk.Tk):
             ("Aquecer números", self.show_number_health),
             ("Conferir risco", self.show_risk),
             ("Histórico", self.show_history),
+            ("Atualizações", self.show_updates),
             ("Configurações", self.show_settings),
         ]
         for label, command in buttons:
@@ -229,7 +230,8 @@ class MezzoldApp(SettingsScreenMixin, tk.Tk):
         return frame
 
     def _scrollable_frame(self, parent: tk.Widget) -> ttk.Frame:
-        canvas = tk.Canvas(parent, background=getattr(self, "_ui_background", "#f6f7fb"), highlightthickness=0)
+        bg = getattr(self, "_ui_background", "#f6f7fb")
+        canvas = tk.Canvas(parent, background=bg, highlightthickness=0)
         scrollbar = ttk.Scrollbar(parent, orient="vertical", command=canvas.yview)
         inner = ttk.Frame(canvas)
         window_id = canvas.create_window((0, 0), window=inner, anchor="nw")
@@ -240,9 +242,27 @@ class MezzoldApp(SettingsScreenMixin, tk.Tk):
         def configure_canvas(event: tk.Event) -> None:
             canvas.itemconfigure(window_id, width=event.width)
 
+        def _on_mousewheel(event: tk.Event) -> None:
+            if event.num == 4 or event.delta > 0:
+                canvas.yview_scroll(-1, "units")
+            elif event.num == 5 or event.delta < 0:
+                canvas.yview_scroll(1, "units")
+
+        def _bind_scroll(_event: object | None = None) -> None:
+            canvas.bind_all("<MouseWheel>", _on_mousewheel)
+            canvas.bind_all("<Button-4>", _on_mousewheel)
+            canvas.bind_all("<Button-5>", _on_mousewheel)
+
+        def _unbind_scroll(_event: object | None = None) -> None:
+            canvas.unbind_all("<MouseWheel>")
+            canvas.unbind_all("<Button-4>")
+            canvas.unbind_all("<Button-5>")
+
         inner.bind("<Configure>", configure_inner)
         canvas.bind("<Configure>", configure_canvas)
         canvas.configure(yscrollcommand=scrollbar.set)
+        canvas.bind("<Enter>", _bind_scroll)
+        canvas.bind("<Leave>", _unbind_scroll)
         canvas.pack(side="left", fill="both", expand=True)
         scrollbar.pack(side="right", fill="y")
         return inner
@@ -290,255 +310,6 @@ class MezzoldApp(SettingsScreenMixin, tk.Tk):
     def show_contacts(self) -> None:
         return self._show_contacts_by_folder()
 
-        frame = self._screen("Clientes")
-        top = ttk.Frame(frame)
-        top.pack(fill="x", pady=(0, 10))
-        search = tk.StringVar()
-        folder_filter = tk.StringVar()
-        ttk.Label(top, text="Buscar").pack(side="left")
-        ttk.Entry(top, textvariable=search, width=34).pack(side="left", padx=(8, 8))
-        ttk.Label(top, text="Pasta").pack(side="left")
-        folder_combo = ttk.Combobox(top, textvariable=folder_filter, values=[""] + contacts.list_groups(), width=18, state="readonly")
-        folder_combo.pack(side="left", padx=(8, 8))
-        ttk.Button(top, text="Filtrar", command=lambda: refresh()).pack(side="left")
-        ttk.Button(top, text="Importar lista", command=self.show_import_contacts).pack(side="left", padx=(8, 0))
-        ttk.Button(top, text="Nova pasta", command=lambda: create_folder()).pack(side="left", padx=(8, 0))
-        ttk.Button(top, text="Renomear pasta", command=lambda: rename_folder()).pack(side="left", padx=(8, 0))
-        ttk.Button(top, text="Excluir pasta", command=lambda: delete_folder()).pack(side="left", padx=(8, 0))
-
-        body = ttk.Frame(frame)
-        body.pack(fill="both", expand=True)
-        tree_frame = ttk.Frame(body)
-        tree_frame.pack(side="left", fill="both", expand=True)
-        columns = ("id", "name", "phone", "group", "opt_in", "source", "blacklisted")
-        tree = ttk.Treeview(tree_frame, columns=columns, show="headings", selectmode="browse")
-        headings = {
-            "id": "ID",
-            "name": "Cliente",
-            "phone": "Telefone",
-            "group": "Grupo",
-            "opt_in": "Autorizado",
-            "source": "Origem",
-            "blacklisted": "Bloqueado",
-        }
-        widths = {"id": 55, "name": 190, "phone": 130, "group": 120, "opt_in": 70, "source": 130, "blacklisted": 90}
-        for column in columns:
-            tree.heading(column, text=headings[column])
-            tree.column(column, width=widths[column], anchor="w")
-        tree.pack(side="left", fill="both", expand=True)
-        scrollbar = ttk.Scrollbar(tree_frame, orient="vertical", command=tree.yview)
-        scrollbar.pack(side="right", fill="y")
-        tree.configure(yscrollcommand=scrollbar.set)
-
-        form = ttk.Frame(body, style="Panel.TFrame", padding=16)
-        form.pack(side="right", fill="y", padx=(16, 0))
-        selected_id = tk.IntVar(value=0)
-        name = tk.StringVar()
-        phone = tk.StringVar()
-        email = tk.StringVar()
-        group_name = tk.StringVar()
-        notes = tk.StringVar()
-        opt_in_source = tk.StringVar(value="manual")
-        opt_in_category = tk.StringVar(value="marketing")
-        opt_in_at = tk.StringVar()
-        consent_notes = tk.StringVar()
-        last_inbound_at = tk.StringVar()
-        opt_in = tk.BooleanVar(value=True)
-        blacklisted = tk.BooleanVar(value=False)
-
-        for label, variable in [
-            ("Nome do cliente", name),
-            ("Telefone com DDD", phone),
-            ("E-mail", email),
-            ("Grupo/lista", group_name),
-            ("Onde autorizou receber mensagens", opt_in_source),
-            ("Tipo de mensagem autorizada", opt_in_category),
-            ("Data da autorização", opt_in_at),
-            ("Última resposta recebida", last_inbound_at),
-            ("Comprovante ou observação da autorização", consent_notes),
-            ("Observações internas", notes),
-        ]:
-            self._entry(form, label, variable).pack(fill="x", pady=(0, 10))
-        ttk.Checkbutton(form, text="Cliente autorizou receber mensagens", variable=opt_in).pack(anchor="w", pady=(0, 8))
-        ttk.Checkbutton(form, text="Bloquear este cliente para envios", variable=blacklisted).pack(anchor="w", pady=(0, 12))
-
-        def clear_form() -> None:
-            selected_id.set(0)
-            for variable in (name, phone, email, group_name, notes, consent_notes, opt_in_at, last_inbound_at):
-                variable.set("")
-            opt_in_source.set("manual")
-            opt_in_category.set("marketing")
-            opt_in.set(True)
-            blacklisted.set(False)
-
-        def refresh_folders() -> None:
-            values = [""] + contacts.list_groups()
-            folder_combo.configure(values=values)
-
-        def create_folder() -> None:
-            folder_name = simpledialog.askstring(APP_TITLE, "Nome da nova pasta:", parent=self)
-            if not folder_name:
-                return
-            try:
-                contacts.create_folder(folder_name)
-            except contacts.ContactError as exc:
-                messagebox.showerror(APP_TITLE, str(exc))
-                return
-            refresh_folders()
-            folder_filter.set(folder_name.strip())
-            group_name.set(folder_name.strip())
-            refresh()
-
-        def rename_folder() -> None:
-            current_name = folder_filter.get().strip()
-            if not current_name:
-                messagebox.showwarning(APP_TITLE, "Escolha uma pasta para renomear.")
-                return
-            folder = next((item for item in contacts.list_folders() if str(item["name"]) == current_name), None)
-            if not folder:
-                messagebox.showerror(APP_TITLE, "Pasta não encontrada.")
-                return
-            new_name = simpledialog.askstring(APP_TITLE, "Novo nome da pasta:", initialvalue=current_name, parent=self)
-            if not new_name:
-                return
-            try:
-                contacts.rename_folder(int(folder["id"]), new_name)
-            except contacts.ContactError as exc:
-                messagebox.showerror(APP_TITLE, str(exc))
-                return
-            refresh_folders()
-            folder_filter.set(new_name.strip())
-            if group_name.get().strip() == current_name:
-                group_name.set(new_name.strip())
-            refresh()
-
-        def delete_folder() -> None:
-            current_name = folder_filter.get().strip()
-            if not current_name:
-                messagebox.showwarning(APP_TITLE, "Escolha uma pasta para excluir.")
-                return
-            folder = next((item for item in contacts.list_folders() if str(item["name"]) == current_name), None)
-            if not folder:
-                messagebox.showerror(APP_TITLE, "Pasta não encontrada.")
-                return
-            if int(folder.get("is_default") or 0):
-                messagebox.showerror(APP_TITLE, "A pasta padrão não pode ser excluída.")
-                return
-            if not messagebox.askyesno(APP_TITLE, f"Excluir a pasta '{current_name}'? Os contatos serão movidos para Importados."):
-                return
-            try:
-                moved = contacts.delete_folder(int(folder["id"]))
-            except contacts.ContactError as exc:
-                messagebox.showerror(APP_TITLE, str(exc))
-                return
-            refresh_folders()
-            folder_filter.set("Importados")
-            if group_name.get().strip() == current_name:
-                group_name.set("Importados")
-            refresh()
-            self._set_status(f"Pasta excluída. {moved} contato(s) movido(s) para Importados.")
-
-        def refresh() -> None:
-            tree.delete(*tree.get_children())
-            for item in contacts.list_contacts(search.get(), folder_filter.get()):
-                tree.insert(
-                    "",
-                    "end",
-                    values=(
-                        item["id"],
-                        item["name"],
-                        item["phone"],
-                        item["group_name"],
-                        "Sim" if item["opt_in"] else "Não",
-                        item.get("opt_in_source") or "",
-                        "Sim" if item["blacklisted"] else "Não",
-                    ),
-                )
-            self._set_status("Lista de clientes atualizada.")
-
-        def on_select(_event: object) -> None:
-            if not tree.selection():
-                return
-            item_id = tree.item(tree.selection()[0], "values")[0]
-            data = contacts.get_contact(int(item_id))
-            if not data:
-                return
-            selected_id.set(int(data["id"]))
-            name.set(str(data["name"]))
-            phone.set(str(data["phone"]))
-            email.set(str(data["email"] or ""))
-            group_name.set(str(data["group_name"] or ""))
-            notes.set(str(data["notes"] or ""))
-            opt_in_source.set(str(data.get("opt_in_source") or ""))
-            opt_in_category.set(str(data.get("opt_in_category") or "marketing"))
-            opt_in_at.set(str(data.get("opt_in_at") or ""))
-            consent_notes.set(str(data.get("consent_notes") or ""))
-            last_inbound_at.set(str(data.get("last_inbound_at") or ""))
-            opt_in.set(bool(data["opt_in"]))
-            blacklisted.set(bool(data["blacklisted"]))
-
-        def save() -> None:
-            try:
-                if selected_id.get():
-                    contacts.update_contact(
-                        selected_id.get(),
-                        name=name.get(),
-                        phone=phone.get(),
-                        email=email.get(),
-                        group_name=group_name.get(),
-                        notes=notes.get(),
-                        opt_in=opt_in.get(),
-                        opt_in_source=opt_in_source.get(),
-                        opt_in_category=opt_in_category.get(),
-                        opt_in_at=opt_in_at.get(),
-                        consent_notes=consent_notes.get(),
-                        last_inbound_at=last_inbound_at.get(),
-                        blacklisted=blacklisted.get(),
-                    )
-                else:
-                    new_id = contacts.add_contact(
-                        name.get(),
-                        phone.get(),
-                        email.get(),
-                        group_name.get(),
-                        int(opt_in.get()),
-                        opt_in_source.get(),
-                        opt_in_category.get(),
-                        opt_in_at.get(),
-                        consent_notes.get(),
-                        notes.get(),
-                    )
-                    selected_id.set(new_id)
-                    contacts.set_blacklist(new_id, blacklisted.get())
-            except contacts.ContactError as exc:
-                messagebox.showerror(APP_TITLE, str(exc))
-                return
-            refresh()
-            self._set_status("Cliente salvo.")
-
-        def delete() -> None:
-            if not selected_id.get():
-                return
-            if not messagebox.askyesno(APP_TITLE, "Excluir este cliente?"):
-                return
-            contacts.delete_contact(selected_id.get())
-            clear_form()
-            refresh()
-
-        tree.bind("<<TreeviewSelect>>", on_select)
-
-        ttk.Button(form, text="Novo", command=clear_form).pack(fill="x", pady=(4, 6))
-        ttk.Button(form, text="Salvar", style="Accent.TButton", command=save).pack(fill="x", pady=6)
-        ttk.Button(form, text="Marcar como pediu para sair", command=lambda: mark_opt_out()).pack(fill="x", pady=6)
-        ttk.Button(form, text="Excluir", command=delete).pack(fill="x", pady=6)
-
-        def mark_opt_out() -> None:
-            if not selected_id.get():
-                return
-            contacts.mark_opt_out(selected_id.get(), "Cliente pediu para nao receber mais mensagens.")
-            refresh()
-            clear_form()
-        refresh()
 
     def _show_contacts_by_folder(self) -> None:
         frame = self._screen("Clientes")
@@ -1042,113 +813,6 @@ class MezzoldApp(SettingsScreenMixin, tk.Tk):
     def show_create_campaign(self) -> None:
         return self._show_create_campaign_by_folder()
 
-        frame = self._screen("Nova campanha")
-        form = ttk.Frame(frame, style="Panel.TFrame", padding=16)
-        form.pack(side="left", fill="both", expand=True)
-        name = tk.StringVar()
-        template_name = tk.StringVar(value=whatsapp.load_config().default_template)
-        template_language = tk.StringVar(value=whatsapp.load_config().default_language)
-        message_categories = {
-            "Marketing": "marketing",
-            "Aviso ou serviço": "utility",
-            "Código de acesso": "authentication",
-            "Atendimento": "service",
-        }
-        message_category = tk.StringVar(value="Marketing")
-        media_path = tk.StringVar()
-
-        self._entry(form, "Nome para identificar esta campanha", name).pack(fill="x", pady=(0, 10))
-        category_frame = ttk.Frame(form, style="Panel.TFrame")
-        category_frame.pack(fill="x", pady=(0, 10))
-        ttk.Label(category_frame, text="Tipo de mensagem", style="Panel.TLabel").pack(anchor="w", pady=(0, 4))
-        ttk.Combobox(
-            category_frame,
-            textvariable=message_category,
-            values=tuple(message_categories.keys()),
-            state="readonly",
-        ).pack(fill="x")
-        template_row = ttk.Frame(form, style="Panel.TFrame")
-        template_row.pack(fill="x", pady=(0, 10))
-        self._entry(template_row, "Nome do modelo aprovado na Meta", template_name).pack(side="left", fill="x", expand=True, padx=(0, 8))
-        self._entry(template_row, "Idioma", template_language).pack(side="left", fill="x")
-
-        ttk.Label(form, text="Mensagem principal", style="Panel.TLabel").pack(anchor="w")
-        message = tk.Text(form, height=8, wrap="word")
-        message.pack(fill="both", expand=True, pady=(4, 10))
-
-        ttk.Label(form, text="Outras versões da mensagem", style="Panel.TLabel").pack(anchor="w")
-        message_variants = tk.Text(form, height=5, wrap="word")
-        message_variants.pack(fill="both", expand=True, pady=(4, 10))
-
-        media_row = ttk.Frame(form, style="Panel.TFrame")
-        media_row.pack(fill="x", pady=(0, 12))
-        ttk.Entry(media_row, textvariable=media_path).pack(side="left", fill="x", expand=True)
-        ttk.Button(
-            media_row,
-            text="Imagem, arquivo ou link",
-            command=lambda: media_path.set(filedialog.askopenfilename() or media_path.get()),
-        ).pack(side="left", padx=(8, 0))
-
-        ttk.Label(form, text="Outras imagens, arquivos ou links", style="Panel.TLabel").pack(anchor="w")
-        media_variants = tk.Text(form, height=3, wrap="word")
-        media_variants.pack(fill="x", pady=(4, 10))
-
-        contact_panel = ttk.Frame(frame, style="Panel.TFrame", padding=16)
-        contact_panel.pack(side="right", fill="both", expand=True, padx=(16, 0))
-        ttk.Label(contact_panel, text="Clientes que autorizaram mensagens", style="Panel.TLabel", font=("Segoe UI Semibold", 11)).pack(anchor="w")
-        filters = ttk.Frame(contact_panel, style="Panel.TFrame")
-        filters.pack(fill="x", pady=(8, 8))
-        group_filter = tk.StringVar()
-        groups = [""] + contacts.list_groups()
-        group_combo = ttk.Combobox(filters, textvariable=group_filter, values=groups, state="readonly")
-        group_combo.pack(side="left", fill="x", expand=True)
-        ttk.Button(filters, text="Filtrar", command=lambda: refresh_contacts()).pack(side="left", padx=(8, 0))
-
-        tree = ttk.Treeview(contact_panel, columns=("id", "name", "phone", "group"), show="headings", selectmode="extended")
-        for column, heading, width in [
-            ("id", "ID", 50),
-            ("name", "Cliente", 190),
-            ("phone", "Telefone", 130),
-            ("group", "Grupo", 120),
-        ]:
-            tree.heading(column, text=heading)
-            tree.column(column, width=width)
-        tree.pack(fill="both", expand=True)
-
-        def refresh_contacts() -> None:
-            tree.delete(*tree.get_children())
-            for item in contacts.list_contacts(group_name=group_filter.get()):
-                if item["opt_in"] and not item["blacklisted"]:
-                    tree.insert("", "end", values=(item["id"], item["name"], item["phone"], item["group_name"]))
-
-        def select_all() -> None:
-            tree.selection_set(tree.get_children())
-
-        def create() -> None:
-            selected = [int(tree.item(item, "values")[0]) for item in tree.selection()]
-            try:
-                campaign_id = campaigns.create_campaign(
-                    name=name.get(),
-                    message=message.get("1.0", "end").strip(),
-                    contact_ids=selected,
-                    media_path=media_path.get(),
-                    template_name=template_name.get(),
-                    template_language=template_language.get(),
-                    message_category=message_categories.get(message_category.get(), "marketing"),
-                    message_variants=parse_variants(message_variants.get("1.0", "end")),
-                    media_variants=parse_variants(media_variants.get("1.0", "end")),
-                )
-            except campaigns.CampaignError as exc:
-                messagebox.showerror(APP_TITLE, str(exc))
-                return
-            messagebox.showinfo(APP_TITLE, "Campanha salva. Agora você pode agendar ou enviar.")
-            self.show_schedule()
-
-        actions = ttk.Frame(contact_panel, style="Panel.TFrame")
-        actions.pack(fill="x", pady=(10, 0))
-        ttk.Button(actions, text="Marcar todos", command=select_all).pack(side="left")
-        ttk.Button(actions, text="Salvar campanha", style="Accent.TButton", command=create).pack(side="right")
-        refresh_contacts()
 
     def _show_create_campaign_by_folder(self) -> None:
         frame = self._screen("Nova campanha")
@@ -1402,72 +1066,6 @@ class MezzoldApp(SettingsScreenMixin, tk.Tk):
 
     def show_schedule(self) -> None:
         return self._show_campaigns_center()
-
-        frame = self._screen("Agenda de envios")
-        tree = self._campaign_tree(frame)
-        tree.pack(fill="both", expand=True)
-
-        controls = ttk.Frame(frame, style="Panel.TFrame", padding=14)
-        controls.pack(fill="x", pady=(12, 0))
-        scheduled_at = tk.StringVar(value=datetime.now().strftime("%Y-%m-%d %H:%M"))
-        ttk.Label(controls, text="Quando enviar").pack(side="left")
-        ttk.Entry(controls, textvariable=scheduled_at, width=22).pack(side="left", padx=(8, 10))
-        progress = tk.StringVar(value="Escolha uma campanha.")
-        ttk.Label(controls, textvariable=progress).pack(side="left", padx=(8, 0))
-
-        def selected_campaign_id() -> int | None:
-            if not tree.selection():
-                messagebox.showwarning(APP_TITLE, "Escolha uma campanha primeiro.")
-                return None
-            return int(tree.item(tree.selection()[0], "values")[0])
-
-        def refresh() -> None:
-            self._fill_campaign_tree(tree)
-
-        def schedule() -> None:
-            campaign_id = selected_campaign_id()
-            if not campaign_id:
-                return
-            try:
-                campaigns.schedule_campaign(campaign_id, parse_datetime(scheduled_at.get()))
-            except campaigns.CampaignError as exc:
-                messagebox.showerror(APP_TITLE, str(exc))
-                return
-            refresh()
-            self._set_status("Envio agendado.")
-
-        def send_now() -> None:
-            campaign_id = selected_campaign_id()
-            if campaign_id:
-                self._start_campaign_thread(campaign_id, progress, source="ui_manual")
-
-        def pause() -> None:
-            campaign_id = selected_campaign_id()
-            if not campaign_id:
-                return
-            event = self.running_events.get(campaign_id)
-            if event:
-                event.set()
-            try:
-                campaigns.pause_campaign(campaign_id)
-            except campaigns.CampaignError as exc:
-                messagebox.showerror(APP_TITLE, str(exc))
-                return
-            refresh()
-
-        def cancel() -> None:
-            campaign_id = selected_campaign_id()
-            if not campaign_id:
-                return
-            if messagebox.askyesno(APP_TITLE, "Cancelar esta campanha? Ela não será enviada."):
-                campaigns.cancel_campaign(campaign_id)
-                refresh()
-
-        ttk.Button(controls, text="Agendar", command=schedule).pack(side="left", padx=(8, 0))
-        ttk.Button(controls, text="Enviar agora", style="Accent.TButton", command=send_now).pack(side="left", padx=(8, 0))
-        ttk.Button(controls, text="Pausar envio", command=pause).pack(side="left", padx=(8, 0))
-        ttk.Button(controls, text="Cancelar envio", command=cancel).pack(side="left", padx=(8, 0))
-        refresh()
 
     def _show_campaigns_center(self) -> None:
         frame = self._screen("Agenda de envios")
@@ -2076,6 +1674,80 @@ class MezzoldApp(SettingsScreenMixin, tk.Tk):
                     item["last_sent_at"],
                 ),
             )
+
+    def show_updates(self) -> None:
+        import app_update as _upd
+        from database import APP_VERSION as _ver
+        frame = self._screen("Atualizações do app")
+        panel = ttk.Frame(frame, style="Panel.TFrame", padding=20)
+        panel.pack(fill="x", pady=(0, 16))
+
+        ttk.Label(
+            panel,
+            text=f"Versão atual: {_ver}",
+            style="Panel.TLabel",
+            font=("Segoe UI Semibold", 13),
+        ).pack(anchor="w")
+        ttk.Label(
+            panel,
+            text=(
+                "O app pode verificar se há uma versão mais recente disponível.\n"
+                "Se houver, abriremos a página de download no navegador.\n"
+                "Seus dados e configurações nunca são apagados automaticamente."
+            ),
+            style="Muted.TLabel",
+            wraplength=740,
+        ).pack(anchor="w", pady=(8, 0))
+
+        status_var = tk.StringVar(value="Clique em 'Verificar' para checar a versão mais recente.")
+        ttk.Label(panel, textvariable=status_var, style="Panel.TLabel", wraplength=740).pack(anchor="w", pady=(14, 0))
+
+        btn_frame = ttk.Frame(panel, style="Panel.TFrame")
+        btn_frame.pack(anchor="w", pady=(14, 0))
+        check_btn = ttk.Button(btn_frame, text="Verificar atualização", style="Accent.TButton")
+        check_btn.pack(side="left")
+
+        def do_check() -> None:
+            from database import get_setting
+            status_var.set("Verificando...")
+            check_btn.configure(state="disabled")
+            manifest_url = get_setting("app_update_manifest_url", "")
+            download_url = get_setting("app_update_download_url", _upd.DEFAULT_DOWNLOAD_URL)
+            channel = get_setting("app_update_channel", _upd.DEFAULT_CHANNEL)
+
+            def worker() -> None:
+                result = _upd.check_for_updates(_ver, manifest_url, download_url=download_url, channel=channel)
+                self.after(0, lambda: finish(result))
+
+            def finish(result) -> None:
+                try:
+                    check_btn.configure(state="normal")
+                except Exception:
+                    return
+                if result.status == "no_manifest":
+                    status_var.set("Nenhuma fonte de atualização configurada ainda.")
+                    if messagebox.askyesno(APP_TITLE, "Abrir página oficial de download?"):
+                        self._open_external_link(result.download_url)
+                elif result.status == "error":
+                    status_var.set(f"Não foi possível checar: {result.error}")
+                    if messagebox.askyesno(APP_TITLE, f"Erro ao checar atualização.\nDetalhe: {result.error}\n\nAbrir página de download?"):
+                        self._open_external_link(result.download_url)
+                elif result.has_update:
+                    status_var.set(f"Nova versão disponível: {result.latest_version}!")
+                    if messagebox.askyesno(APP_TITLE, f"Versão {result.latest_version} disponível.\nAbrir página de download?"):
+                        self._open_external_link(result.download_url)
+                else:
+                    status_var.set(f"Você já está na versão mais recente ({_ver}).")
+
+            threading.Thread(target=worker, daemon=True).start()
+
+        check_btn.configure(command=do_check)
+        ttk.Label(
+            frame,
+            text="Atualização automática ainda não está habilitada nesta versão. A atualização é manual via download.",
+            style="Muted.TLabel",
+            wraplength=740,
+        ).pack(anchor="w", pady=(12, 0))
 
     def show_number_health(self) -> None:
         frame = self._screen("Aquecimento dos números")
