@@ -58,6 +58,7 @@ class SettingsScreenMixin:
         frame = self._screen("Configurações")
         frame = self._scrollable_frame(frame)
         config = whatsapp.load_config()
+        is_admin = hasattr(self, "_is_admin") and self._is_admin()
 
         header = ttk.Frame(frame, style="Panel.TFrame", padding=16)
         header.pack(fill="x", pady=(0, 12))
@@ -111,12 +112,12 @@ class SettingsScreenMixin:
         )
         delay_notice = tk.StringVar()
         delivery_modes = {
-            "API Oficial Meta": whatsapp.DELIVERY_MODE_OFFICIAL_API,
-            "WhatsApp Web Experimental": whatsapp.DELIVERY_MODE_WHATSAPP_WEB_EXPERIMENTAL,
-            "Manual / Dry-run": whatsapp.DELIVERY_MODE_MANUAL_ASSISTED,
+            "API Oficial Meta (avançado)": whatsapp.DELIVERY_MODE_OFFICIAL_API,
+            "WhatsApp Web/Desktop": whatsapp.DELIVERY_MODE_WHATSAPP_WEB_EXPERIMENTAL,
+            "Simulação / link manual": whatsapp.DELIVERY_MODE_MANUAL_ASSISTED,
         }
         delivery_mode_labels = {value: label for label, value in delivery_modes.items()}
-        delivery_mode = tk.StringVar(value=delivery_mode_labels.get(config.delivery_mode, "API Oficial Meta"))
+        delivery_mode = tk.StringVar(value=delivery_mode_labels.get(config.delivery_mode, "API Oficial Meta (avançado)"))
         web_status_data = whatsapp.get_whatsapp_web_status()
         web_status = tk.StringVar(value=f"WhatsApp Web: {web_status_data['label']}.")
         web_warning = tk.StringVar()
@@ -177,20 +178,31 @@ class SettingsScreenMixin:
         license_key = tk.StringVar(value=str(license_data.get("license_key", "")))
         license_plan = tk.StringVar(value=str(license_data.get("plan_name", "")))
         license_until = tk.StringVar(value=str(license_data.get("valid_until", "")))
-        advanced = section(
-            left,
-            "Área avançada / desenvolvimento",
-            "Campos técnicos preservados para compatibilidade. O cliente comum não precisa alterar esta área.",
-        )
-        for label, variable in [
-            ("Código da licença", license_key),
-            ("Plano", license_plan),
-            ("Validade", license_until),
-        ]:
-            self._entry(advanced, label, variable).pack(fill="x", pady=(10, 0))
-        self._entry(advanced, "URL do manifesto de atualização (opcional)", update_manifest_url).pack(fill="x", pady=(10, 0))
-        self._entry(advanced, "Página de download", update_download_url).pack(fill="x", pady=(10, 0))
-        self._entry(advanced, "Intervalo global de fallback (segundos)", interval).pack(fill="x", pady=(10, 0))
+        if is_admin:
+            advanced = section(
+                left,
+                "Área avançada / suporte",
+                "Campos técnicos para configuração e suporte. Usuários comuns não precisam alterar.",
+            )
+            for label, variable in [
+                ("Código da licença", license_key),
+                ("Plano", license_plan),
+                ("Validade", license_until),
+            ]:
+                self._entry(advanced, label, variable).pack(fill="x", pady=(10, 0))
+            self._entry(advanced, "URL do manifesto de atualização (opcional)", update_manifest_url).pack(fill="x", pady=(10, 0))
+            self._entry(advanced, "Página de download", update_download_url).pack(fill="x", pady=(10, 0))
+            self._entry(advanced, "Intervalo global de fallback (segundos)", interval).pack(fill="x", pady=(10, 0))
+        else:
+            advanced = ttk.Frame(left, style="Panel.TFrame")  # placeholder vazio, nunca exibido
+            adv_note = ttk.Frame(left, style="Panel.TFrame", padding=12)
+            adv_note.pack(fill="x", pady=(0, 12))
+            ttk.Label(
+                adv_note,
+                text="Configurações avançadas disponíveis apenas para administradores.",
+                style="Muted.TLabel",
+                wraplength=500,
+            ).pack(anchor="w")
 
         security = section(
             left,
@@ -207,26 +219,27 @@ class SettingsScreenMixin:
         )
         delay_combo.pack(fill="x")
         ttk.Label(security, textvariable=delay_notice, style="Muted.TLabel", wraplength=500).pack(anchor="w", pady=(6, 0))
-        ttk.Checkbutton(security, text="Modo teste / dry-run: registrar sem enviar de verdade", variable=dry_run).pack(anchor="w", pady=(12, 0))
+        ttk.Checkbutton(security, text="Modo simulação: registrar sem enviar de verdade", variable=dry_run).pack(anchor="w", pady=(12, 0))
         ttk.Checkbutton(security, text="Impedir envio quando o risco estiver muito alto", variable=block_high_risk).pack(anchor="w", pady=(8, 0))
         ttk.Checkbutton(security, text="Usar pausas automáticas entre mensagens", variable=smart_send).pack(anchor="w", pady=(8, 0))
 
-        ttk.Label(advanced, text="Pausas automaticas e delays personalizados", style="Panel.TLabel").pack(anchor="w", pady=(12, 0))
-        smart_grid = ttk.Frame(advanced, style="Panel.TFrame")
-        smart_grid.pack(fill="x")
-        for index, (label, variable) in enumerate([
-            ("Espera mínima (s)", smart_min_interval),
-            ("Espera máxima (s)", smart_max_interval),
-            ("Pausa a cada X envios", smart_pause_every),
-            ("Pausa curta mínima (s)", smart_pause_min),
-            ("Pausa curta máxima (s)", smart_pause_max),
-            ("Máximo diário neste modo", smart_daily_limit),
-            ("Tempo máximo seguido (min)", smart_max_session),
-        ]):
-            holder = ttk.Frame(smart_grid, style="Panel.TFrame")
-            holder.grid(row=index // 2, column=index % 2, sticky="ew", padx=(0 if index % 2 == 0 else 8, 0), pady=(10, 0))
-            smart_grid.columnconfigure(index % 2, weight=1)
-            self._entry(holder, label, variable).pack(fill="x")
+        if is_admin:
+            ttk.Label(advanced, text="Pausas automaticas e delays personalizados", style="Panel.TLabel").pack(anchor="w", pady=(12, 0))
+            smart_grid = ttk.Frame(advanced, style="Panel.TFrame")
+            smart_grid.pack(fill="x")
+            for index, (label, variable) in enumerate([
+                ("Espera mínima (s)", smart_min_interval),
+                ("Espera máxima (s)", smart_max_interval),
+                ("Pausa a cada X envios", smart_pause_every),
+                ("Pausa curta mínima (s)", smart_pause_min),
+                ("Pausa curta máxima (s)", smart_pause_max),
+                ("Máximo diário neste modo", smart_daily_limit),
+                ("Tempo máximo seguido (min)", smart_max_session),
+            ]):
+                holder = ttk.Frame(smart_grid, style="Panel.TFrame")
+                holder.grid(row=index // 2, column=index % 2, sticky="ew", padx=(0 if index % 2 == 0 else 8, 0), pady=(10, 0))
+                smart_grid.columnconfigure(index % 2, weight=1)
+                self._entry(holder, label, variable).pack(fill="x")
 
         mode_block = section(right, "Modo de envio", "A API Oficial Meta é o modo recomendado e principal.")
         ttk.Label(mode_block, text="Como o app deve enviar", style="Panel.TLabel").pack(anchor="w", pady=(10, 4))
@@ -263,8 +276,9 @@ class SettingsScreenMixin:
         ]:
             self._entry(meta_block, label, variable, show="*" if label.startswith("Token") else None).pack(fill="x", pady=(10, 0))
         combo(meta_block, "Idioma padrão do modelo", default_language, language_values)
-        self._entry(advanced, "Versão da API da Meta", api_version).pack(fill="x", pady=(10, 0))
-        self._entry(advanced, "Modelo aprovado padrão", default_template).pack(fill="x", pady=(10, 0))
+        if is_admin:
+            self._entry(advanced, "Versão da API da Meta", api_version).pack(fill="x", pady=(10, 0))
+            self._entry(advanced, "Modelo aprovado padrão", default_template).pack(fill="x", pady=(10, 0))
 
         startup_block = section(left, "Inicialização")
         ttk.Label(startup_block, text=startup_status, style="Muted.TLabel", wraplength=500).pack(anchor="w", pady=(4, 0))
