@@ -22,6 +22,11 @@ class AuthError(ValueError):
 class User:
     id: int
     username: str
+    role: str = "user"
+
+    @property
+    def is_admin(self) -> bool:
+        return self.role == "admin"
 
 
 def _b64(data: bytes) -> str:
@@ -70,45 +75,48 @@ def user_count() -> int:
     return int(row["total"])
 
 
-def create_user(username: str, password: str) -> User:
+def create_user(username: str, password: str, role: str = "user") -> User:
     username = username.strip()
+    role = role.strip() if role.strip() in {"user", "admin"} else "user"
     if not username:
         raise AuthError("Informe um nome de usuário.")
     if len(password) < 8:
         raise AuthError("A senha precisa ter pelo menos 8 caracteres.")
-
     with connect() as conn:
         try:
             cursor = conn.execute(
-                """
-                INSERT INTO users (username, password_hash, created_at)
-                VALUES (?, ?, ?)
-                """,
-                (username, hash_password(password), now_text()),
+                "INSERT INTO users (username, password_hash, role, created_at) VALUES (?, ?, ?, ?)",
+                (username, hash_password(password), role, now_text()),
             )
         except Exception as exc:
-            message = str(exc).lower()
-            if "unique" in message:
+            if "unique" in str(exc).lower():
                 raise AuthError("Esse nome de usuário já está em uso.") from exc
             raise
-
-    return User(id=int(cursor.lastrowid), username=username)
+    return User(id=int(cursor.lastrowid), username=username, role=role)
 
 
 def authenticate(username: str, password: str) -> User | None:
     with connect() as conn:
         row = conn.execute(
-            "SELECT id, username, password_hash FROM users WHERE username = ?",
+            "SELECT id, username, password_hash, role FROM users WHERE username = ?",
             (username.strip(),),
         ).fetchone()
-
         data = row_to_dict(row)
         if not data or not verify_password(password, data["password_hash"]):
             return None
+        conn.execute("UPDATE users SET last_login_at = ? WHERE id = ?", (now_text(), data["id"]))
+    return User(id=int(data["id"]), username=str(data["username"]), role=str(data.get("role") or "user"))
 
-        conn.execute(
-            "UPDATE users SET last_login_at = ? WHERE id = ?",
-            (now_text(), data["id"]),
-        )
 
-    return User(id=int(data["id"]), username=str(data["username"]))
+def list_users() -> list[dict]:
+    with connect() as conn:
+        rows = conn.execute(
+            "SELECT id, username, role, created_at, last_login_at FROM users ORDER BY id"
+        ).fetchall()
+    return [dict(row) for row in rows]
+
+
+def set_user_role(user_id: int, role: str) -> None:
+    role = role.strip() if role.strip() in {"user", "admin"} else "user"
+    with connect() as conn:
+        conn.execute("UPDATE users SET role = ? WHERE id = ?", (role, user_id))
