@@ -183,9 +183,10 @@ class MezzoldApp(SettingsScreenMixin, tk.Tk):
             background="#1f2937",
             font=("Segoe UI Semibold", 14),
         ).pack(anchor="w", pady=(0, 6))
+        _role_badge = " [admin]" if self._is_admin() else ""
         ttk.Label(
             sidebar,
-            text=f"{self.current_user.username if self.current_user else ''}",
+            text=f"{self.current_user.username if self.current_user else ''}{_role_badge}",
             foreground="#cbd5e1",
             background="#1f2937",
         ).pack(anchor="w", pady=(0, 18))
@@ -202,6 +203,8 @@ class MezzoldApp(SettingsScreenMixin, tk.Tk):
             ("Atualizações", self.show_updates),
             ("Configurações", self.show_settings),
         ]
+        if self._is_admin():
+            buttons.insert(-1, ("Gerenciar usuários", self.show_user_management))
         for label, command in buttons:
             ttk.Button(sidebar, text=label, style="Sidebar.TButton", command=command).pack(fill="x", pady=3)
 
@@ -275,6 +278,9 @@ class MezzoldApp(SettingsScreenMixin, tk.Tk):
 
     def _set_status(self, text: str) -> None:
         self.status_var.set(text)
+
+    def _is_admin(self) -> bool:
+        return self.current_user is not None and getattr(self.current_user, "is_admin", False)
 
     def show_dashboard(self) -> None:
         frame = self._screen("Início")
@@ -863,14 +869,42 @@ class MezzoldApp(SettingsScreenMixin, tk.Tk):
         message_variants = tk.Text(form, height=5, wrap="word")
         message_variants.pack(fill="both", expand=True, pady=(4, 10))
 
+        ALLOWED_IMAGE_EXTS = {".jpg", ".jpeg", ".png", ".webp", ".mp4", ".3gp"}
+        MAX_IMAGE_MB = 16
+
+        image_status_var = tk.StringVar(value="Nenhuma imagem selecionada (opcional).")
         media_row = ttk.Frame(form, style="Panel.TFrame")
-        media_row.pack(fill="x", pady=(0, 12))
-        ttk.Entry(media_row, textvariable=media_path).pack(side="left", fill="x", expand=True)
-        ttk.Button(
-            media_row,
-            text="Imagem, arquivo ou link",
-            command=lambda: media_path.set(filedialog.askopenfilename() or media_path.get()),
-        ).pack(side="left", padx=(8, 0))
+        media_row.pack(fill="x", pady=(0, 4))
+        ttk.Label(media_row, text="Imagem ou arquivo opcional", style="Panel.TLabel").pack(anchor="w", pady=(0, 4))
+        media_btn_row = ttk.Frame(media_row, style="Panel.TFrame")
+        media_btn_row.pack(fill="x")
+
+        def pick_image() -> None:
+            import os
+            from pathlib import Path as _Path
+            path = filedialog.askopenfilename(
+                filetypes=[("Imagens/vídeos", "*.jpg *.jpeg *.png *.webp *.mp4 *.3gp"), ("Todos", "*.*")]
+            )
+            if not path:
+                return
+            p = _Path(path)
+            if p.suffix.lower() not in ALLOWED_IMAGE_EXTS:
+                messagebox.showerror(APP_TITLE, f"Extensão não suportada: {p.suffix}. Use JPG, PNG, WEBP ou MP4.")
+                return
+            size_mb = os.path.getsize(path) / (1024 * 1024)
+            if size_mb > MAX_IMAGE_MB:
+                messagebox.showerror(APP_TITLE, f"Arquivo muito grande: {size_mb:.1f} MB. Limite: {MAX_IMAGE_MB} MB.")
+                return
+            media_path.set(path)
+            image_status_var.set(f"Selecionado: {p.name} ({size_mb:.1f} MB)")
+
+        def clear_image() -> None:
+            media_path.set("")
+            image_status_var.set("Nenhuma imagem selecionada (opcional).")
+
+        ttk.Button(media_btn_row, text="Escolher arquivo", command=pick_image).pack(side="left")
+        ttk.Button(media_btn_row, text="Remover", command=clear_image).pack(side="left", padx=(8, 0))
+        ttk.Label(media_row, textvariable=image_status_var, style="Muted.TLabel", wraplength=640).pack(anchor="w", pady=(4, 0))
 
         ttk.Label(form, text="Outras imagens, arquivos ou links", style="Panel.TLabel").pack(anchor="w")
         media_variants = tk.Text(form, height=3, wrap="word")
@@ -884,6 +918,42 @@ class MezzoldApp(SettingsScreenMixin, tk.Tk):
         schedule_row.pack(fill="x", pady=(6, 0))
         ttk.Radiobutton(schedule_row, text="Agendar para", variable=start_mode, value="schedule").pack(side="left")
         ttk.Entry(schedule_row, textvariable=start_at, width=22).pack(side="left", padx=(8, 0))
+
+        SECURITY_PRESETS_UI = {
+            "Seguro (recomendado)": (60, 120),
+            "Moderado": (30, 45),
+            "Rápido (maior risco)": (10, 20),
+        }
+        security_preset_var = tk.StringVar(value="Moderado")
+        preset_panel = ttk.Frame(form, style="Panel.TFrame")
+        preset_panel.pack(fill="x", pady=(0, 8))
+        ttk.Label(preset_panel, text="Velocidade de envio", style="Panel.TLabel").pack(anchor="w", pady=(0, 4))
+        preset_combo = ttk.Combobox(
+            preset_panel,
+            textvariable=security_preset_var,
+            values=list(SECURITY_PRESETS_UI.keys()),
+            state="readonly",
+        )
+        preset_combo.pack(fill="x")
+        preset_notice_var = tk.StringVar(value="")
+        ttk.Label(preset_panel, textvariable=preset_notice_var, style="Muted.TLabel", wraplength=640).pack(anchor="w", pady=(4, 0))
+
+        def apply_security_preset(*_args: object) -> None:
+            preset = security_preset_var.get()
+            if preset in SECURITY_PRESETS_UI:
+                mn, mx = SECURITY_PRESETS_UI[preset]
+                delay_min.set(str(mn))
+                delay_max.set(str(mx))
+                delay_customized.set(False)
+                if "Rápido" in preset:
+                    preset_notice_var.set("ATENÇÃO: intervalos curtos aumentam risco de bloqueio da conta WhatsApp.")
+                elif "Seguro" in preset:
+                    preset_notice_var.set("Seguro: intervalos maiores, menor risco de bloqueio. Recomendado para listas grandes.")
+                else:
+                    preset_notice_var.set("Moderado: equilíbrio entre velocidade e segurança.")
+
+        preset_combo.bind("<<ComboboxSelected>>", apply_security_preset)
+        apply_security_preset()
 
         delay_panel = ttk.Frame(form, style="Panel.TFrame")
         delay_panel.pack(fill="x", pady=(0, 12))
@@ -1749,6 +1819,85 @@ class MezzoldApp(SettingsScreenMixin, tk.Tk):
             wraplength=740,
         ).pack(anchor="w", pady=(12, 0))
 
+    def show_user_management(self) -> None:
+        if not self._is_admin():
+            messagebox.showerror(APP_TITLE, "Apenas administradores podem acessar esta área.")
+            return
+        frame = self._screen("Gerenciar usuários")
+
+        panel = ttk.Frame(frame, style="Panel.TFrame", padding=16)
+        panel.pack(fill="both", expand=True)
+
+        columns = ("id", "username", "role", "created", "last_login")
+        tree = ttk.Treeview(panel, columns=columns, show="headings", selectmode="browse")
+        for col, heading, width in [
+            ("id", "ID", 55), ("username", "Usuário", 220),
+            ("role", "Nível", 100), ("created", "Criado em", 160), ("last_login", "Último login", 160),
+        ]:
+            tree.heading(col, text=heading)
+            tree.column(col, width=width, anchor="w")
+        tree.pack(fill="both", expand=True)
+
+        def refresh() -> None:
+            tree.delete(*tree.get_children())
+            for u in auth.list_users():
+                tree.insert("", "end", values=(
+                    u["id"], u["username"], u.get("role") or "user",
+                    u.get("created_at") or "", u.get("last_login_at") or "",
+                ))
+
+        def promote() -> None:
+            sel = tree.selection()
+            if not sel:
+                return
+            user_id = int(tree.item(sel[0], "values")[0])
+            if messagebox.askyesno(APP_TITLE, "Tornar este usuário administrador?"):
+                auth.set_user_role(user_id, "admin")
+                refresh()
+
+        def demote() -> None:
+            sel = tree.selection()
+            if not sel:
+                return
+            user_id = int(tree.item(sel[0], "values")[0])
+            if self.current_user and user_id == self.current_user.id:
+                messagebox.showerror(APP_TITLE, "Você não pode remover o próprio admin.")
+                return
+            if messagebox.askyesno(APP_TITLE, "Remover nível admin deste usuário?"):
+                auth.set_user_role(user_id, "user")
+                refresh()
+
+        new_frame = ttk.Frame(panel, style="Panel.TFrame", padding=(0, 12, 0, 0))
+        new_frame.pack(fill="x")
+        new_username = tk.StringVar()
+        new_password = tk.StringVar()
+        new_role_var = tk.StringVar(value="user")
+        self._entry(new_frame, "Novo usuário", new_username).pack(side="left", fill="x", expand=True, padx=(0, 8))
+        self._entry(new_frame, "Senha", new_password, show="*").pack(side="left", fill="x", expand=True, padx=(0, 8))
+        role_holder = ttk.Frame(new_frame, style="Panel.TFrame")
+        role_holder.pack(side="left", padx=(0, 8))
+        ttk.Label(role_holder, text="Nível", style="Panel.TLabel").pack(anchor="w")
+        ttk.Combobox(role_holder, textvariable=new_role_var, values=("user", "admin"), state="readonly", width=10).pack(fill="x")
+
+        def create_new_user() -> None:
+            try:
+                auth.create_user(new_username.get(), new_password.get(), new_role_var.get())
+            except auth.AuthError as exc:
+                messagebox.showerror(APP_TITLE, str(exc))
+                return
+            new_username.set("")
+            new_password.set("")
+            refresh()
+
+        ttk.Button(new_frame, text="Criar", command=create_new_user).pack(side="left", pady=(20, 0))
+
+        actions = ttk.Frame(panel)
+        actions.pack(fill="x", pady=(10, 0))
+        ttk.Button(actions, text="Atualizar", command=refresh).pack(side="left")
+        ttk.Button(actions, text="Tornar admin", command=promote).pack(side="left", padx=(8, 0))
+        ttk.Button(actions, text="Remover admin", command=demote).pack(side="left", padx=(8, 0))
+        refresh()
+
     def show_number_health(self) -> None:
         frame = self._screen("Aquecimento dos números")
         stats = warmup.dashboard_stats()
@@ -2092,6 +2241,28 @@ class MezzoldApp(SettingsScreenMixin, tk.Tk):
                 f"Esta campanha precisa de atenção: {risk['score']}% de risco ({risk['level']}).\n\n{notes}\n\nDeseja enviar mesmo assim?",
             )
             if not proceed:
+                return
+
+        # Confirmação obrigatória antes de envio real
+        _config_check = whatsapp.load_config()
+        if not _config_check.dry_run and interactive:
+            _campaign_info = campaigns.get_campaign(campaign_id)
+            _contacts_total = len(campaigns.get_campaign_contacts(campaign_id))
+            _campaign_name = (_campaign_info or {}).get("name") or f"Campanha #{campaign_id}"
+            _folder = (_campaign_info or {}).get("folder_name") or "?"
+            _mode_label = whatsapp.delivery_mode_label((_campaign_info or {}).get("delivery_mode") or _config_check.delivery_mode)
+            _proceed = messagebox.askyesno(
+                APP_TITLE,
+                f"Você está prestes a iniciar um envio REAL pelo WhatsApp.\n\n"
+                f"Campanha: {_campaign_name}\n"
+                f"Pasta de contatos: {_folder}\n"
+                f"Total de contatos: {_contacts_total}\n"
+                f"Modo de envio: {_mode_label}\n\n"
+                "Use apenas contatos que autorizaram receber mensagens.\n"
+                "Disparos agressivos podem resultar em bloqueio da conta.\n\n"
+                "Deseja continuar?",
+            )
+            if not _proceed:
                 return
 
         explicit_confirmation = False
