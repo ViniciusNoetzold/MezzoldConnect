@@ -10,6 +10,19 @@ import zipfile
 from pathlib import Path
 
 
+_HAS_DISPLAY = True
+try:
+    import tkinter as _tk
+    _root = _tk.Tk()
+    _root.withdraw()
+    _root.destroy()
+    del _root, _tk
+except Exception:
+    _HAS_DISPLAY = False
+
+_requires_display = unittest.skipUnless(_HAS_DISPLAY, "tkinter display not available")
+
+
 APP_MODULES = (
     "database",
     "contacts",
@@ -62,6 +75,7 @@ class DesktopSmokeTests(unittest.TestCase):
         self.assertEqual(self.database.get_setting("app_update_channel"), "beta")
         self.assertEqual(self.database.get_setting("app_current_version"), self.database.APP_VERSION)
 
+    @_requires_display
     def test_settings_screen_presets_preserve_custom_values(self) -> None:
         settings = importlib.import_module("screens.settings")
 
