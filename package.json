@@ -1,6 +1,6 @@
 {
   "name": "phone-health-rampup-service",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "description": "Phone number health scoring and warm-up service for B2B messaging.",
   "type": "module",
   "private": true,
