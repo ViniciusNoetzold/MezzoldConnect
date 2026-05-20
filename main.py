@@ -13,7 +13,8 @@ def main() -> None:
         return
 
     initialize_database()
-    run_app()
+    minimized = "--minimized" in sys.argv
+    run_app(start_minimized=minimized)
 
 
 if __name__ == "__main__":

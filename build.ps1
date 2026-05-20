@@ -1,3 +1,4 @@
 $ErrorActionPreference = "Stop"
 
-python -m PyInstaller --clean -y --onefile --noconsole --name "Mezzold Connect" main.py
+# Uses the project spec file so hidden imports (pystray, Pillow) are included.
+python -m PyInstaller --clean -y "Mezzold Connect.spec"

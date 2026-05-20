@@ -495,6 +495,11 @@ class WhatsAppWebExperimentalProvider:
             edge_options.add_argument("--start-maximized")
             self._driver = webdriver.Edge(options=edge_options)
         self._set_status(WEB_STATUS_WAITING_QR, "Navegador aberto. Leia o QR Code se ele aparecer.")
+        try:
+            import app_log
+            app_log.chrome_opened()
+        except Exception:
+            pass
         return self._driver
 
     def _ensure_connected_driver(self) -> Any:
@@ -514,6 +519,13 @@ class WhatsAppWebExperimentalProvider:
             lambda current_driver: self._page_state(current_driver)[0]
             in {WEB_STATUS_WAITING_QR, WEB_STATUS_CONNECTED}
         )
+        state, _ = self._safe_page_state(driver)
+        if state == WEB_STATUS_WAITING_QR:
+            try:
+                import app_log
+                app_log.whatsapp_qr_needed()
+            except Exception:
+                pass
 
     def _wait_until_connected(self, driver: Any) -> None:
         try:
@@ -526,9 +538,19 @@ class WhatsAppWebExperimentalProvider:
             WebDriverWait(driver, 60).until(
                 lambda current_driver: self._page_state(current_driver)[0] == WEB_STATUS_CONNECTED
             )
+            try:
+                import app_log
+                app_log.whatsapp_connected()
+            except Exception:
+                pass
         except TimeoutException as exc:
             status, message = self._safe_page_state(driver)
             self._set_status(status, message)
+            try:
+                import app_log
+                app_log.whatsapp_disconnected()
+            except Exception:
+                pass
             raise WhatsAppWebSessionError(
                 "WhatsApp Web nao esta conectado. Abra Configuracoes, conecte pelo QR Code e tente novamente."
             ) from exc

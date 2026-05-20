@@ -7,11 +7,13 @@ from datetime import datetime
 from pathlib import Path
 from tkinter import filedialog, messagebox, simpledialog, ttk
 
+import app_log
 import auth
 import campaigns
 import compliance
 import contact_service as contacts
 import network
+import tray_icon
 import warmup
 import whatsapp
 from database import APP_TITLE, APP_VERSION, DEFAULT_CONTACT_FOLDER, get_setting
@@ -60,7 +62,7 @@ def friendly_status(value: object) -> str:
 
 
 class MezzoldApp(SettingsScreenMixin, HelpScreenMixin, ConnectionScreenMixin, LeadSearchMixin, tk.Tk):
-    def __init__(self) -> None:
+    def __init__(self, start_minimized: bool = False) -> None:
         super().__init__()
         self.title(f"{APP_TITLE} {APP_VERSION}")
         self.geometry("1180x760")
@@ -71,6 +73,9 @@ class MezzoldApp(SettingsScreenMixin, HelpScreenMixin, ConnectionScreenMixin, Le
         self.running_events: dict[int, threading.Event] = {}
         self.running_warmups: dict[int, threading.Event] = {}
         self.current_screen = ""
+        self._tray_manager: tray_icon.TrayIconManager | None = None
+        self._quitting = False
+        self._start_minimized = start_minimized
 
         self._configure_style()
         self.show_login()
@@ -226,6 +231,11 @@ class MezzoldApp(SettingsScreenMixin, HelpScreenMixin, ConnectionScreenMixin, Le
         self.show_dashboard()
         self._resume_interrupted_campaigns()
         self.after(15000, self._scheduler_tick)
+        self._setup_tray()
+        if self._start_minimized:
+            self._start_minimized = False
+            self.after(300, self._minimize_to_tray)
+        app_log.agent_started()
 
     def _screen(self, title: str) -> ttk.Frame:
         self.current_screen = title
@@ -880,8 +890,12 @@ class MezzoldApp(SettingsScreenMixin, HelpScreenMixin, ConnectionScreenMixin, Le
 
     def _show_create_campaign_by_folder(self) -> None:
         frame = self._screen("Nova campanha")
-        form = ttk.Frame(frame, style="Panel.TFrame", padding=16)
-        form.pack(side="left", fill="both", expand=True)
+        body = ttk.Frame(frame)
+        body.pack(fill="both", expand=True)
+        # folder panel must be packed first so it anchors right before the canvas fills the rest
+        folder_panel_outer = ttk.Frame(body, style="Panel.TFrame", padding=16)
+        folder_panel_outer.pack(side="right", fill="y", padx=(16, 0))
+        form = self._scrollable_frame(body)
         name = tk.StringVar()
         template_name = tk.StringVar(value=whatsapp.load_config().default_template)
         template_language = tk.StringVar(value=whatsapp.load_config().default_language)
@@ -1023,8 +1037,7 @@ class MezzoldApp(SettingsScreenMixin, HelpScreenMixin, ConnectionScreenMixin, Le
         ttk.Button(delay_row, text="Usar recomendacao", command=lambda: apply_delay_recommendation()).pack(side="left", pady=(20, 0))
         ttk.Label(delay_panel, textvariable=delay_info, style="Muted.TLabel", wraplength=640).pack(anchor="w", pady=(6, 0))
 
-        folder_panel = ttk.Frame(frame, style="Panel.TFrame", padding=16)
-        folder_panel.pack(side="right", fill="y", padx=(16, 0))
+        folder_panel = folder_panel_outer
         ttk.Label(folder_panel, text="Pasta de contatos", style="Panel.TLabel", font=("Segoe UI Semibold", 11)).pack(anchor="w")
         selected_folder = tk.StringVar()
         folder_combo = ttk.Combobox(folder_panel, textvariable=selected_folder, values=contacts.list_groups(), state="readonly", width=34)
@@ -1197,6 +1210,43 @@ class MezzoldApp(SettingsScreenMixin, HelpScreenMixin, ConnectionScreenMixin, Le
 
     def _show_campaigns_center(self) -> None:
         frame = self._screen("Agenda de envios")
+
+        # -- Etapa 3: painel de status do agente --
+        agent_bar = ttk.Frame(frame, style="Panel.TFrame", padding=(10, 5))
+        agent_bar.pack(fill="x", pady=(0, 8))
+        _agent_var = tk.StringVar()
+        _web_var = tk.StringVar()
+        _last_var = tk.StringVar()
+
+        def _refresh_agent_status() -> None:
+            running_ids = list(self.running_events.keys())
+            if running_ids:
+                _agent_var.set(f"Agente: enviando campanhas {running_ids}")
+            elif campaigns.get_due_campaigns():
+                _agent_var.set("Agente: campanhas agendadas aguardando")
+            else:
+                _agent_var.set("Agente: ativo, sem envios no momento")
+
+            snapshot = whatsapp.get_whatsapp_web_status()
+            _web_var.set(f"WhatsApp Web: {snapshot['label']}")
+
+            all_camps = campaigns.list_campaigns()
+            sending = [c for c in all_camps if str(c.get("status")) == campaigns.CAMPAIGN_STATUS_SENDING]
+            if sending:
+                camp = sending[0]
+                sent = int(camp.get("sent_contacts") or 0)
+                total = int(camp.get("total_contacts") or 0)
+                failed = int(camp.get("failed_contacts") or 0)
+                _last_var.set(f"Campanha: {camp.get('name') or ''} | Enviados: {sent}/{total} | Falhas: {failed}")
+            else:
+                _last_var.set("")
+
+        ttk.Label(agent_bar, textvariable=_agent_var, style="Panel.TLabel").pack(side="left")
+        ttk.Label(agent_bar, textvariable=_web_var, style="Panel.TLabel").pack(side="left", padx=(20, 0))
+        ttk.Label(agent_bar, textvariable=_last_var, style="Muted.TLabel").pack(side="left", padx=(20, 0))
+        _refresh_agent_status()
+        # -- /Etapa 3 --
+
         campaign_by_id: dict[int, dict[str, object]] = {}
         name_var = tk.StringVar()
         scheduled_at = tk.StringVar()
@@ -1214,6 +1264,8 @@ class MezzoldApp(SettingsScreenMixin, HelpScreenMixin, ConnectionScreenMixin, Le
         refresh_button.pack(side="left")
         open_button = ttk.Button(top, text="Abrir campanha")
         open_button.pack(side="left", padx=(8, 0))
+        resend_button = ttk.Button(top, text="Reenviar")
+        resend_button.pack(side="left", padx=(8, 0))
         send_button = ttk.Button(top, text="Iniciar agora", style="Accent.TButton")
         send_button.pack(side="left", padx=(8, 0))
         schedule_button = ttk.Button(top, text="Agendar")
@@ -1412,6 +1464,19 @@ class MezzoldApp(SettingsScreenMixin, HelpScreenMixin, ConnectionScreenMixin, Le
             if campaign_id:
                 self._start_campaign_thread(campaign_id, progress, source="ui_manual")
 
+        def resend_campaign() -> None:
+            campaign_id = selected_campaign_id()
+            if not campaign_id:
+                return
+            try:
+                new_campaign_id = campaigns.duplicate_campaign_for_resend(campaign_id)
+            except campaigns.CampaignError as exc:
+                messagebox.showerror(APP_TITLE, str(exc))
+                return
+            refresh(new_campaign_id)
+            duplicated = campaigns.get_campaign(new_campaign_id) or {}
+            self._set_status(f"Campanha duplicada para reenvio: {duplicated.get('name') or new_campaign_id}.")
+
         def continue_campaign() -> None:
             campaign_id = selected_campaign_id()
             if campaign_id:
@@ -1607,6 +1672,7 @@ class MezzoldApp(SettingsScreenMixin, HelpScreenMixin, ConnectionScreenMixin, Le
         tree.bind("<<TreeviewSelect>>", on_select)
         refresh_button.configure(command=refresh)
         open_button.configure(command=open_campaign)
+        resend_button.configure(command=resend_campaign)
         send_button.configure(command=send_now)
         schedule_button.configure(command=schedule_selected)
         pause_button.configure(command=pause)
@@ -2380,6 +2446,7 @@ class MezzoldApp(SettingsScreenMixin, HelpScreenMixin, ConnectionScreenMixin, Le
 
         def worker() -> None:
             try:
+                app_log.campaign_started(campaign_id)
                 totals = campaigns.send_campaign(
                     campaign_id,
                     progress_callback=progress,
@@ -2388,12 +2455,15 @@ class MezzoldApp(SettingsScreenMixin, HelpScreenMixin, ConnectionScreenMixin, Le
                     allow_resume=allow_resume,
                     explicit_user_confirmation=explicit_confirmation,
                 )
+                app_log.campaign_done(campaign_id, totals)
                 done = (
                     f"Campanha #{campaign_id}: enviados {totals['enviado']}, "
                     f"simulados {totals['simulado']}, manuais {totals['pendente_manual']}, "
                     f"falhas {totals['falhou']}."
                 )
                 self.after(0, lambda: self._set_status(done))
+                if self._tray_manager:
+                    self.after(0, lambda: self._tray_manager.update_tooltip(f"Mezzold Connect — {done}") if self._tray_manager else None)
             except campaigns.CampaignError as exc:
                 if interactive:
                     self.after(0, lambda: messagebox.showerror(APP_TITLE, str(exc)))
@@ -2452,6 +2522,86 @@ class MezzoldApp(SettingsScreenMixin, HelpScreenMixin, ConnectionScreenMixin, Le
 
         threading.Thread(target=worker, daemon=True).start()
         self._set_status(f"Aquecendo número #{number_id}.")
+
+    # ------------------------------------------------------------------ tray
+
+    def _setup_tray(self) -> None:
+        """Initialize the system tray icon (Etapa 1). No-op if pystray/Pillow absent."""
+        if self._tray_manager is not None:
+            return
+        if not tray_icon.is_available():
+            return
+        self._tray_manager = tray_icon.TrayIconManager(self)
+        self._tray_manager.start()
+        self.protocol("WM_DELETE_WINDOW", self._on_window_close)
+
+    def _on_window_close(self) -> None:
+        """Ask the user whether to minimize to tray or quit when pressing X."""
+        if self._tray_manager is not None:
+            answer = messagebox.askyesno(
+                APP_TITLE,
+                "Minimizar para a bandeja do Windows e continuar os envios em segundo plano?\n\n"
+                "Clique em Não para encerrar o aplicativo.",
+                default="yes",
+            )
+            if answer:
+                self._minimize_to_tray()
+            else:
+                self._quit_confirmed()
+        else:
+            self._quit_confirmed()
+
+    def _minimize_to_tray(self) -> None:
+        """Hide the main window and keep the process running."""
+        self.withdraw()
+        app_log.app_minimized_to_tray()
+        if self._tray_manager:
+            self._tray_manager.update_tooltip("Mezzold Connect — rodando em segundo plano")
+
+    def show_from_tray(self) -> None:
+        """Restore the main window from the tray."""
+        self.deiconify()
+        self.lift()
+        self.focus_force()
+        app_log.app_restored_from_tray()
+        if self._tray_manager:
+            self._tray_manager.update_tooltip("Mezzold Connect")
+
+    def tray_pause_all(self) -> None:
+        """Pause all running campaigns from the tray menu."""
+        for event in list(self.running_events.values()):
+            event.set()
+        self._set_status("Envios pausados pela bandeja do sistema.")
+        if self._tray_manager:
+            self._tray_manager.update_tooltip("Mezzold Connect — pausado")
+
+    def tray_resume_all(self) -> None:
+        """Resume paused/due campaigns from the tray menu."""
+        resumable = [
+            c for c in campaigns.get_resumable_campaigns()
+            if campaigns.has_pending_contacts(int(c["id"]))
+        ]
+        due = campaigns.get_due_campaigns()
+        for campaign in resumable + due:
+            self._start_campaign_thread(
+                int(campaign["id"]),
+                interactive=False,
+                internet_alert=False,
+                source="tray_resume",
+                allow_resume=True,
+            )
+        if not (resumable or due):
+            self._set_status("Nenhuma campanha para retomar no momento.")
+
+    def _quit_confirmed(self) -> None:
+        """Cleanly shut down the app."""
+        app_log.app_closed()
+        self._quitting = True
+        if self._tray_manager:
+            self._tray_manager.stop()
+        self.destroy()
+
+    # ---------------------------------------------------------------- /tray
 
     def _send_due_campaigns(self, quiet: bool = False) -> None:
         due = campaigns.get_due_campaigns()
@@ -2523,6 +2673,7 @@ def parse_variants(value: str) -> list[str]:
     return [line.strip() for line in text.splitlines() if line.strip()]
 
 
-def run_app() -> None:
-    app = MezzoldApp()
+def run_app(start_minimized: bool = False) -> None:
+    app_log.app_started()
+    app = MezzoldApp(start_minimized=start_minimized)
     app.mainloop()

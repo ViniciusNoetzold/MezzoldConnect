@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import random
 import os
+import re
 import sqlite3
 import time
 import uuid
@@ -66,6 +67,7 @@ DEFAULT_DELAY_MIN_SECONDS = 30
 DEFAULT_DELAY_MAX_SECONDS = 45
 LOW_DELAY_WARNING_SECONDS = 10
 WEB_EXPERIMENTAL_MIN_DELAY_SECONDS = 10
+RESEND_NAME_RE = re.compile(r"^(?P<base>.+?)\s+\+\s+envio\s+(?P<number>\d+)$", re.IGNORECASE)
 
 
 def _normalize_delivery_mode_for_campaign(value: object) -> str:
@@ -317,6 +319,107 @@ def get_campaign_contacts(campaign_id: int) -> list[dict[str, Any]]:
             (campaign_id,),
         ).fetchall()
     return rows_to_dicts(rows)
+
+
+def _resend_base_name(name: object) -> str:
+    """Strip '+ envio N' suffix to get the original campaign name."""
+    text = str(name or "").strip()
+    match = RESEND_NAME_RE.match(text)
+    if match:
+        return str(match.group("base")).strip()
+    return text
+
+
+def next_resend_campaign_name(name: object) -> str:
+    """Return 'Nome + envio N' with N incremented beyond any existing copies."""
+    base_name = _resend_base_name(name)
+    if not base_name:
+        raise CampaignError("A campanha original precisa ter um nome.")
+
+    highest = 1
+    with connect() as conn:
+        rows = conn.execute("SELECT name FROM campaigns").fetchall()
+
+    for row in rows:
+        current_name = str(row["name"] or "").strip()
+        if current_name.casefold() == base_name.casefold():
+            highest = max(highest, 1)
+            continue
+        match = RESEND_NAME_RE.match(current_name)
+        if not match:
+            continue
+        if str(match.group("base")).strip().casefold() != base_name.casefold():
+            continue
+        highest = max(highest, int(match.group("number")))
+
+    return f"{base_name} + envio {highest + 1}"
+
+
+def duplicate_campaign_for_resend(campaign_id: int) -> int:
+    """Create a new draft campaign copied from campaign_id (contacts reset to waiting)."""
+    source = get_campaign(campaign_id)
+    if not source:
+        raise CampaignError("Não encontrei essa campanha.")
+
+    contacts_to_copy = get_campaign_contacts(campaign_id)
+    if not contacts_to_copy:
+        raise CampaignError("A campanha original não tem contatos para reenviar.")
+
+    variants = get_campaign_variants(campaign_id)
+    if not variants:
+        variants = [{"body": str(source.get("message") or ""), "media_path": str(source.get("media_path") or "")}]
+
+    resend_name = next_resend_campaign_name(source.get("name"))
+    timestamp = now_text()
+    with connect() as conn:
+        cursor = conn.execute(
+            """
+            INSERT INTO campaigns
+                (name, message, media_path, template_name, template_language,
+                 message_category, folder_name, delay_min_seconds, delay_max_seconds,
+                 delivery_mode, risk_score, risk_level, risk_notes, status,
+                 scheduled_at, created_at, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                resend_name,
+                str(source.get("message") or ""),
+                str(source.get("media_path") or ""),
+                str(source.get("template_name") or ""),
+                str(source.get("template_language") or "pt_BR"),
+                str(source.get("message_category") or "marketing"),
+                str(source.get("folder_name") or ""),
+                int(source.get("delay_min_seconds") or DEFAULT_DELAY_MIN_SECONDS),
+                int(source.get("delay_max_seconds") or DEFAULT_DELAY_MAX_SECONDS),
+                _normalize_delivery_mode_for_campaign(source.get("delivery_mode") or DELIVERY_MODE_OFFICIAL_API),
+                0,
+                "pendente",
+                "",
+                CAMPAIGN_STATUS_DRAFT,
+                None,
+                timestamp,
+                timestamp,
+            ),
+        )
+        new_campaign_id = int(cursor.lastrowid)
+        conn.executemany(
+            "INSERT INTO campaign_contacts (campaign_id, contact_id, status, updated_at) VALUES (?, ?, ?, ?)",
+            [(new_campaign_id, int(c["id"]), CONTACT_STATUS_WAITING, timestamp) for c in contacts_to_copy],
+        )
+        conn.executemany(
+            "INSERT INTO campaign_variants (campaign_id, body, media_path, created_at) VALUES (?, ?, ?, ?)",
+            [
+                (new_campaign_id, str(v.get("body") or ""), str(v.get("media_path") or ""), timestamp)
+                for v in variants
+            ],
+        )
+
+    compliance.refresh_campaign_risk(new_campaign_id)
+    _send_log(
+        f"DUPLICATE source_campaign_id={campaign_id} new_campaign_id={new_campaign_id} "
+        f"name={_preview(resend_name)} contacts={len(contacts_to_copy)}"
+    )
+    return new_campaign_id
 
 
 def schedule_campaign(campaign_id: int, scheduled_at: str) -> None:
