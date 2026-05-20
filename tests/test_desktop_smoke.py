@@ -304,6 +304,35 @@ class DesktopSmokeTests(unittest.TestCase):
         self.assertEqual(snapshot["status"], self.whatsapp.WEB_STATUS_ERROR)
         self.assertIn("Edge", snapshot["message"])
 
+    def test_whatsapp_web_page_state_accepts_loaded_composer_as_connected(self) -> None:
+        provider = self.whatsapp.WhatsAppWebExperimentalProvider()
+
+        class FakeElement:
+            def is_displayed(self) -> bool:
+                return True
+
+            def is_enabled(self) -> bool:
+                return True
+
+        class FakeDriver:
+            def find_elements(self, _by: object, selector: str) -> list[object]:
+                if selector == "#pane-side":
+                    return []
+                if selector == "footer":
+                    return [FakeElement()]
+                if selector == "canvas":
+                    return []
+                if selector == "div[contenteditable='true']":
+                    return []
+                return []
+
+            def find_element(self, _by: object, _selector: str) -> object:
+                raise RuntimeError("body not needed")
+
+        status, message = provider._page_state(FakeDriver())
+        self.assertEqual(status, self.whatsapp.WEB_STATUS_CONNECTED)
+        self.assertIn("conectado", message)
+
     def test_whatsapp_web_real_send_requires_explicit_confirmation(self) -> None:
         self.database.set_setting("block_high_risk_campaigns", "0")
         self.whatsapp.save_config(
