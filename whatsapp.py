@@ -250,6 +250,18 @@ class WhatsAppBusinessClient:
                 delivery_mode=delivery_mode,
             )
 
+        _media_path_val = str(campaign.get("media_path") or "")
+        if (
+            _media_path_val
+            and not _media_path_val.startswith(("http://", "https://"))
+            and delivery_mode == DELIVERY_MODE_OFFICIAL_API
+            and not self.config.dry_run
+        ):
+            raise WhatsAppAPIError(
+                "Para envio real com imagem via API Oficial, o arquivo precisa estar hospedado em um link público (https://). "
+                "No modo simulação, a imagem local é registrada normalmente."
+            )
+
         if delivery_mode == DELIVERY_MODE_MANUAL_ASSISTED:
             return SendResult(
                 status="pendente_manual",
