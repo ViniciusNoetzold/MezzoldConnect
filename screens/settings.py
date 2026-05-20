@@ -362,6 +362,11 @@ class SettingsScreenMixin:
                     self.after(0, lambda: web_status.set(f"WhatsApp Web: erro. {exc}"))
                     self.after(0, lambda: messagebox.showerror(APP_TITLE, str(exc)))
                     return
+                except Exception as exc:
+                    message = f"Erro inesperado ao abrir o WhatsApp Web: {exc}"
+                    self.after(0, lambda: web_status.set(f"WhatsApp Web: erro. {message}"))
+                    self.after(0, lambda: messagebox.showerror(APP_TITLE, message))
+                    return
                 self.after(
                     0,
                     lambda: web_status.set(f"WhatsApp Web: {snapshot['label']}. {snapshot['message']}"),

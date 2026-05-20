@@ -1,7 +1,8 @@
 from __future__ import annotations
 
-import random
 import os
+import random
+import re
 import sqlite3
 import time
 import uuid
@@ -52,11 +53,13 @@ CAMPAIGN_TERMINAL_STATUSES = {
 }
 CONTACT_STATUS_WAITING = "aguardando"
 CONTACT_STATUS_SENT = "enviado"
+CONTACT_STATUS_SIMULATED = "simulado"
 CONTACT_STATUS_BLOCKED = "bloqueado"
 CONTACT_STATUS_NO_PERMISSION = "sem_autorizacao"
 CONTACT_STATUS_MANUAL_PENDING = "aguardando_manual"
 CONTACT_FINAL_STATUSES = {
     CONTACT_STATUS_SENT,
+    CONTACT_STATUS_SIMULATED,
     CONTACT_STATUS_BLOCKED,
     CONTACT_STATUS_NO_PERMISSION,
     CONTACT_STATUS_MANUAL_PENDING,
@@ -65,6 +68,7 @@ DEFAULT_DELAY_MIN_SECONDS = 30
 DEFAULT_DELAY_MAX_SECONDS = 45
 LOW_DELAY_WARNING_SECONDS = 10
 WEB_EXPERIMENTAL_MIN_DELAY_SECONDS = 10
+RESEND_NAME_RE = re.compile(r"^(?P<base>.+?)\s+\+\s+envio\s+(?P<number>\d+)$", re.IGNORECASE)
 
 
 def _normalize_delivery_mode_for_campaign(value: object) -> str:
@@ -259,7 +263,7 @@ def list_campaigns() -> list[dict[str, Any]]:
                 COALESCE(COUNT(cc.contact_id), 0) AS total_contacts,
                 COALESCE(SUM(CASE WHEN cc.status = 'enviado' THEN 1 ELSE 0 END), 0) AS sent_contacts,
                 COALESCE(SUM(CASE WHEN cc.status = 'falhou' THEN 1 ELSE 0 END), 0) AS failed_contacts,
-                COALESCE(SUM(CASE WHEN cc.status IN ('enviado', 'falhou', 'bloqueado', 'sem_autorizacao', 'aguardando_manual') THEN 1 ELSE 0 END), 0) AS processed_contacts
+                COALESCE(SUM(CASE WHEN cc.status IN ('enviado', 'simulado', 'falhou', 'bloqueado', 'sem_autorizacao', 'aguardando_manual') THEN 1 ELSE 0 END), 0) AS processed_contacts
             FROM campaigns c
             LEFT JOIN campaign_contacts cc ON cc.campaign_id = c.id
             GROUP BY c.id
@@ -281,11 +285,12 @@ def has_pending_contacts(campaign_id: int) -> bool:
             SELECT COUNT(*) AS total
             FROM campaign_contacts
             WHERE campaign_id = ?
-              AND status NOT IN (?, ?, ?, ?)
+              AND status NOT IN (?, ?, ?, ?, ?)
             """,
             (
                 campaign_id,
                 CONTACT_STATUS_SENT,
+                CONTACT_STATUS_SIMULATED,
                 CONTACT_STATUS_BLOCKED,
                 CONTACT_STATUS_NO_PERMISSION,
                 CONTACT_STATUS_MANUAL_PENDING,
@@ -298,6 +303,120 @@ def get_campaign(campaign_id: int) -> dict[str, Any] | None:
     with connect() as conn:
         row = conn.execute("SELECT * FROM campaigns WHERE id = ?", (campaign_id,)).fetchone()
     return row_to_dict(row)
+
+
+def _resend_base_name(name: object) -> str:
+    text = str(name or "").strip()
+    match = RESEND_NAME_RE.match(text)
+    if match:
+        return str(match.group("base")).strip()
+    return text
+
+
+def next_resend_campaign_name(name: object) -> str:
+    base_name = _resend_base_name(name)
+    if not base_name:
+        raise CampaignError("A campanha original precisa ter um nome.")
+
+    highest = 1
+    with connect() as conn:
+        rows = conn.execute("SELECT name FROM campaigns").fetchall()
+
+    for row in rows:
+        current_name = str(row["name"] or "").strip()
+        if current_name.casefold() == base_name.casefold():
+            highest = max(highest, 1)
+            continue
+        match = RESEND_NAME_RE.match(current_name)
+        if not match:
+            continue
+        candidate_base = str(match.group("base")).strip()
+        if candidate_base.casefold() != base_name.casefold():
+            continue
+        highest = max(highest, int(match.group("number")))
+
+    return f"{base_name} + envio {highest + 1}"
+
+
+def duplicate_campaign_for_resend(campaign_id: int) -> int:
+    source = get_campaign(campaign_id)
+    if not source:
+        raise CampaignError("Nao encontrei essa campanha.")
+
+    contacts_to_copy = get_campaign_contacts(campaign_id)
+    if not contacts_to_copy:
+        raise CampaignError("A campanha original nao tem contatos para reenviar.")
+
+    variants = get_campaign_variants(campaign_id)
+    if not variants:
+        variants = [{"body": str(source.get("message") or ""), "media_path": str(source.get("media_path") or "")}]
+
+    resend_name = next_resend_campaign_name(source.get("name"))
+    timestamp = now_text()
+    with connect() as conn:
+        cursor = conn.execute(
+            """
+            INSERT INTO campaigns
+                (name, message, media_path, template_name, template_language,
+                 message_category, folder_name, delay_min_seconds, delay_max_seconds,
+                 delivery_mode, risk_score, risk_level, risk_notes, status,
+                 scheduled_at, created_at, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                resend_name,
+                str(source.get("message") or ""),
+                str(source.get("media_path") or ""),
+                str(source.get("template_name") or ""),
+                str(source.get("template_language") or "pt_BR"),
+                str(source.get("message_category") or "marketing"),
+                str(source.get("folder_name") or ""),
+                int(source.get("delay_min_seconds") or DEFAULT_DELAY_MIN_SECONDS),
+                int(source.get("delay_max_seconds") or DEFAULT_DELAY_MAX_SECONDS),
+                _normalize_delivery_mode_for_campaign(source.get("delivery_mode") or DELIVERY_MODE_OFFICIAL_API),
+                0,
+                "pendente",
+                "",
+                CAMPAIGN_STATUS_DRAFT,
+                None,
+                timestamp,
+                timestamp,
+            ),
+        )
+        new_campaign_id = int(cursor.lastrowid)
+        conn.executemany(
+            """
+            INSERT INTO campaign_contacts (campaign_id, contact_id, status, updated_at)
+            VALUES (?, ?, ?, ?)
+            """,
+            [
+                (new_campaign_id, int(contact["id"]), CONTACT_STATUS_WAITING, timestamp)
+                for contact in contacts_to_copy
+            ],
+        )
+        conn.executemany(
+            """
+            INSERT INTO campaign_variants (campaign_id, body, media_path, created_at)
+            VALUES (?, ?, ?, ?)
+            """,
+            [
+                (
+                    new_campaign_id,
+                    str(variant.get("body") or ""),
+                    str(variant.get("media_path") or ""),
+                    timestamp,
+                )
+                for variant in variants
+            ],
+        )
+
+    compliance.refresh_campaign_risk(new_campaign_id)
+    _send_log(
+        "DUPLICATE "
+        f"source_campaign_id={campaign_id} new_campaign_id={new_campaign_id} "
+        f"name={_preview(resend_name)} contacts={len(contacts_to_copy)}"
+    )
+    return new_campaign_id
 
 
 def get_campaign_contacts(campaign_id: int) -> list[dict[str, Any]]:
@@ -540,7 +659,7 @@ def dashboard_stats() -> dict[str, int]:
         blocked = conn.execute("SELECT COUNT(*) AS total FROM contacts WHERE blacklisted = 1").fetchone()["total"]
         campaigns = conn.execute("SELECT COUNT(*) AS total FROM campaigns").fetchone()["total"]
         scheduled = conn.execute("SELECT COUNT(*) AS total FROM campaigns WHERE status = 'agendada'").fetchone()["total"]
-        sent = conn.execute("SELECT COUNT(*) AS total FROM message_logs WHERE status IN ('enviado', 'simulado')").fetchone()["total"]
+        sent = conn.execute("SELECT COUNT(*) AS total FROM message_logs WHERE status = 'enviado'").fetchone()["total"]
         failed = conn.execute("SELECT COUNT(*) AS total FROM message_logs WHERE status = 'falhou'").fetchone()["total"]
     return {
         "contacts": int(contacts),
@@ -599,7 +718,7 @@ def _sent_today_count() -> int:
             """
             SELECT COUNT(*) AS total
             FROM message_logs
-            WHERE status IN ('enviado', 'simulado', 'pendente_manual')
+            WHERE status IN ('enviado', 'pendente_manual')
               AND created_at LIKE ?
             """,
             (today + "%",),
@@ -685,11 +804,12 @@ def _pending_contact_count(conn, campaign_id: int) -> int:
         SELECT COUNT(*) AS total
         FROM campaign_contacts
         WHERE campaign_id = ?
-          AND status NOT IN (?, ?, ?, ?)
+          AND status NOT IN (?, ?, ?, ?, ?)
         """,
         (
             campaign_id,
             CONTACT_STATUS_SENT,
+            CONTACT_STATUS_SIMULATED,
             CONTACT_STATUS_BLOCKED,
             CONTACT_STATUS_NO_PERMISSION,
             CONTACT_STATUS_MANUAL_PENDING,
@@ -984,7 +1104,12 @@ def _send_campaign_locked(
             )
             result = client.send_campaign_message(contact, campaign_for_send)
             status = "simulado" if result.dry_run else result.status
-            contact_status = CONTACT_STATUS_MANUAL_PENDING if status == "pendente_manual" else CONTACT_STATUS_SENT
+            if status == CONTACT_STATUS_SIMULATED:
+                contact_status = CONTACT_STATUS_SIMULATED
+            elif status == "pendente_manual":
+                contact_status = CONTACT_STATUS_MANUAL_PENDING
+            else:
+                contact_status = CONTACT_STATUS_SENT
             _update_campaign_contact(campaign_id, contact_id, contact_status, "")
             log_message(
                 campaign_id,
