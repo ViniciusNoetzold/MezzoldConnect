@@ -89,6 +89,13 @@ def run_background_worker(poll_seconds: int = 60) -> None:
 
     _log("Envios em segundo plano iniciados.")
     try:
+        import app_log as _app_log
+        _app_log.app_started()
+        _app_log.agent_started()
+    except Exception:
+        pass
+
+    try:
         while True:
             try:
                 _run_pending_campaigns()
@@ -99,3 +106,8 @@ def run_background_worker(poll_seconds: int = 60) -> None:
     finally:
         lock.close()
         _log("Envios em segundo plano encerrados.")
+        try:
+            import app_log as _app_log
+            _app_log.app_closed()
+        except Exception:
+            pass
