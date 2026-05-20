@@ -1,8 +1,6 @@
 from __future__ import annotations
 
 import re
-import tkinter as tk
-from tkinter import messagebox, simpledialog, ttk
 
 from database import APP_TITLE, DEFAULT_CONTACT_FOLDER
 
@@ -25,6 +23,8 @@ def extract_phones_from_text(text: str) -> list[str]:
 
 class LeadSearchMixin:
     def show_lead_search(self) -> None:
+        import tkinter as tk
+        from tkinter import messagebox, simpledialog, ttk
         import webbrowser
         import contact_service as _cs
 
