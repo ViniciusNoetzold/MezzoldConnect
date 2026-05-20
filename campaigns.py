@@ -10,6 +10,7 @@ from threading import Event
 from typing import Any, Callable
 
 import compliance
+import network
 from database import DATA_DIR, connect, now_text, row_to_dict, rows_to_dicts
 from database import get_setting
 from whatsapp import (
@@ -927,6 +928,18 @@ def _send_campaign_locked(
             _send_log(f"STOP_REQUEST campaign_id={campaign_id} at={index}/{total}")
             break
 
+        # Verificar internet a cada 10 contatos processados
+        if index % 10 == 0 and not config.dry_run:
+            try:
+                if not network.has_internet():
+                    _set_campaign_status(campaign_id, CAMPAIGN_STATUS_PAUSED)
+                    _send_log(f"PAUSE campaign_id={campaign_id} reason=internet_lost at={index}/{total}")
+                    if progress_callback:
+                        progress_callback(index, total, "Sem internet. Campanha pausada automaticamente.")
+                    break
+            except Exception:
+                pass
+
         contact_id = int(contact["id"])
         phone = str(contact["phone"])
         name = str(contact["name"])
@@ -1047,3 +1060,27 @@ def _update_campaign_contact(campaign_id: int, contact_id: int, status: str, err
             """,
             (status, error, now_text(), campaign_id, contact_id),
         )
+
+
+def export_history_csv(campaign_id: int | None = None, limit: int = 5000) -> str:
+    import csv
+    import io
+    logs = list_campaign_logs(campaign_id, limit) if campaign_id else list_logs(limit)
+    output = io.StringIO()
+    writer = csv.DictWriter(
+        output,
+        fieldnames=["data_hora", "campanha", "contato", "telefone", "status", "modo", "erro"],
+        extrasaction="ignore",
+    )
+    writer.writeheader()
+    for item in logs:
+        writer.writerow({
+            "data_hora": item.get("created_at") or "",
+            "campanha": item.get("campaign_name") or "",
+            "contato": item.get("recipient_name") or "",
+            "telefone": item.get("phone") or "",
+            "status": item.get("status") or "",
+            "modo": item.get("delivery_mode") or "",
+            "erro": item.get("error_message") or "",
+        })
+    return output.getvalue()

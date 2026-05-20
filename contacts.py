@@ -678,3 +678,27 @@ def import_contacts(path_text: str, folder_name: str = "") -> ImportSummary:
             summary.imported += 1
 
     return summary
+
+
+def export_contacts_csv(folder_name: str = "", search: str = "") -> str:
+    import io
+    items = list_contacts(search=search, group_name=folder_name)
+    output = io.StringIO()
+    writer = csv.DictWriter(
+        output,
+        fieldnames=["nome", "telefone", "email", "pasta", "opt_in", "blacklist", "origem", "observacoes"],
+        extrasaction="ignore",
+    )
+    writer.writeheader()
+    for item in items:
+        writer.writerow({
+            "nome": item.get("name") or "",
+            "telefone": item.get("phone") or "",
+            "email": item.get("email") or "",
+            "pasta": item.get("group_name") or "",
+            "opt_in": "sim" if item.get("opt_in") else "nao",
+            "blacklist": "sim" if item.get("blacklisted") else "nao",
+            "origem": item.get("opt_in_source") or "",
+            "observacoes": item.get("notes") or "",
+        })
+    return output.getvalue()

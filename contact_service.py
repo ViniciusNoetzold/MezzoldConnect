@@ -229,3 +229,7 @@ def mark_contact_as_used(
         action_url=action_url,
         message_body=message_body,
     )
+
+
+def export_contacts_csv(folder_name: str = "", search: str = "") -> str:
+    return contacts.export_contacts_csv(folder_name=folder_name, search=search)
