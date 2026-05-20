@@ -16,6 +16,9 @@ import warmup
 import whatsapp
 from database import APP_TITLE, APP_VERSION, DEFAULT_CONTACT_FOLDER, get_setting
 from screens.settings import SettingsScreenMixin
+from screens.lead_search import LeadSearchMixin
+from screens.help_screen import HelpScreenMixin
+from screens.connection_screen import ConnectionScreenMixin
 
 
 
@@ -56,7 +59,7 @@ def friendly_status(value: object) -> str:
     return STATUS_LABELS.get(text, text)
 
 
-class MezzoldApp(SettingsScreenMixin, tk.Tk):
+class MezzoldApp(SettingsScreenMixin, HelpScreenMixin, ConnectionScreenMixin, LeadSearchMixin, tk.Tk):
     def __init__(self) -> None:
         super().__init__()
         self.title(f"{APP_TITLE} {APP_VERSION}")
@@ -195,12 +198,15 @@ class MezzoldApp(SettingsScreenMixin, tk.Tk):
             ("Início", self.show_dashboard),
             ("Clientes", self.show_contacts),
             ("Importar clientes", self.show_import_contacts),
+            ("Conexão WhatsApp", self.show_whatsapp_connection),
+            ("Buscar leads", self.show_lead_search),
             ("Nova campanha", self.show_create_campaign),
             ("Agenda de envios", self.show_schedule),
             ("Aquecer números", self.show_number_health),
             ("Conferir risco", self.show_risk),
             ("Histórico", self.show_history),
             ("Atualizações", self.show_updates),
+            ("Ajuda", self.show_help),
             ("Configurações", self.show_settings),
         ]
         if self._is_admin():
@@ -278,6 +284,37 @@ class MezzoldApp(SettingsScreenMixin, tk.Tk):
 
     def _set_status(self, text: str) -> None:
         self.status_var.set(text)
+
+    def _toast(self, message: str, duration_ms: int = 3500, kind: str = "info") -> None:
+        colors = {
+            "info": "#1f2937",
+            "success": "#166534",
+            "error": "#991b1b",
+            "warning": "#92400e",
+        }
+        bg = colors.get(kind, colors["info"])
+        try:
+            toast = tk.Toplevel(self)
+            toast.overrideredirect(True)
+            toast.attributes("-topmost", True)
+            self.update_idletasks()
+            w, h = 400, 50
+            x = self.winfo_x() + self.winfo_width() - w - 24
+            y = self.winfo_y() + 58
+            toast.geometry(f"{w}x{h}+{x}+{y}")
+            tk.Label(
+                toast,
+                text=message,
+                background=bg,
+                foreground="#ffffff",
+                font=("Segoe UI", 10),
+                anchor="w",
+                padx=16,
+                wraplength=360,
+            ).pack(fill="both", expand=True)
+            toast.after(duration_ms, toast.destroy)
+        except Exception:
+            pass
 
     def _is_admin(self) -> bool:
         return self.current_user is not None and getattr(self.current_user, "is_admin", False)
@@ -371,6 +408,8 @@ class MezzoldApp(SettingsScreenMixin, tk.Tk):
         edit_contact_button.pack(side="left", padx=(8, 0))
         import_folder_button = ttk.Button(content_actions, text="Importar para esta pasta")
         import_folder_button.pack(side="left", padx=(8, 0))
+        export_contacts_btn = ttk.Button(content_actions, text="Exportar CSV")
+        export_contacts_btn.pack(side="left", padx=(8, 0))
 
         notebook = ttk.Notebook(content)
         notebook.pack(fill="both", expand=True)
@@ -694,7 +733,7 @@ class MezzoldApp(SettingsScreenMixin, tk.Tk):
                     return
                 dialog.destroy()
                 refresh_folders(group_name.get())
-                self._set_status("Contato salvo.")
+                self._toast("Contato salvo.", kind="success")
 
             def delete_contact() -> None:
                 if not contact_id:
@@ -731,6 +770,24 @@ class MezzoldApp(SettingsScreenMixin, tk.Tk):
         for tree in (contacts_tree, optin_tree, blacklist_tree):
             tree.bind("<Double-1>", lambda _event: edit_selected_contact())
 
+        def do_export_contacts() -> None:
+            from pathlib import Path as _Path
+            folder = current_folder_name()
+            default_name = f"contatos-{folder or 'todos'}.csv".replace(" ", "_")
+            path = filedialog.asksaveasfilename(
+                defaultextension=".csv",
+                filetypes=[("CSV", "*.csv"), ("Todos", "*.*")],
+                initialfile=default_name,
+            )
+            if not path:
+                return
+            try:
+                content = contacts.export_contacts_csv(folder_name=folder, search=search.get())
+                _Path(path).write_text(content, encoding="utf-8-sig")
+                self._set_status(f"Exportado: {path}")
+            except Exception as exc:
+                messagebox.showerror(APP_TITLE, f"Erro ao exportar: {exc}")
+
         refresh_button.configure(command=refresh_contacts)
         new_folder_button.configure(command=create_folder)
         first_folder_button.configure(command=create_folder)
@@ -739,6 +796,7 @@ class MezzoldApp(SettingsScreenMixin, tk.Tk):
         add_contact_button.configure(command=lambda: open_contact_dialog())
         edit_contact_button.configure(command=edit_selected_contact)
         import_folder_button.configure(command=import_to_current_folder)
+        export_contacts_btn.configure(command=do_export_contacts)
 
         refresh_folders()
 
@@ -812,7 +870,7 @@ class MezzoldApp(SettingsScreenMixin, tk.Tk):
             if errors:
                 text += f"\nO que revisar primeiro:\n{errors}"
             result.set(text)
-            self._set_status(f"Importacao concluida em '{selected_folder}'.")
+            self._toast(f"Importação concluída em '{selected_folder}'.", kind="success")
 
         ttk.Button(panel, text="Importar clientes", style="Accent.TButton", command=do_import).pack(anchor="w")
 
@@ -1667,6 +1725,24 @@ class MezzoldApp(SettingsScreenMixin, tk.Tk):
         ttk.Button(top, text="Atualizar", command=self.show_history).pack(side="left")
         ttk.Button(top, text="Abrir WhatsApp manual", command=lambda: open_action()).pack(side="left", padx=(8, 0))
         ttk.Button(top, text="Telefones já usados", command=self.show_sent_numbers).pack(side="left", padx=(8, 0))
+
+        def _export_history() -> None:
+            from pathlib import Path as _Path
+            path = filedialog.asksaveasfilename(
+                defaultextension=".csv",
+                filetypes=[("CSV", "*.csv")],
+                initialfile="historico-envios.csv",
+            )
+            if not path:
+                return
+            try:
+                content = campaigns.export_history_csv()
+                _Path(path).write_text(content, encoding="utf-8-sig")
+                self._set_status(f"Histórico exportado: {path}")
+            except Exception as exc:
+                messagebox.showerror(APP_TITLE, f"Erro ao exportar: {exc}")
+
+        ttk.Button(top, text="Exportar CSV", command=_export_history).pack(side="left", padx=(8, 0))
         columns = ("created_at", "campaign", "recipient", "phone", "status", "mode", "action", "error")
         tree = ttk.Treeview(frame, columns=columns, show="headings")
         for column, heading, width in [
@@ -2129,7 +2205,7 @@ class MezzoldApp(SettingsScreenMixin, tk.Tk):
                 messagebox.showerror(APP_TITLE, str(exc))
                 return
             refresh()
-            self._set_status("Número salvo.")
+            self._toast("Número salvo.", kind="success")
 
         def delete() -> None:
             number_id = selected_number_id()
