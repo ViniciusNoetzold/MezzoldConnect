@@ -8,6 +8,7 @@ import tempfile
 import unittest
 import zipfile
 from pathlib import Path
+from unittest import mock
 
 
 APP_MODULES = (
@@ -110,6 +111,36 @@ class DesktopSmokeTests(unittest.TestCase):
         self.assertIn("Leads Manuais", folder_names)
         self.assertIn("Leads CSV", folder_names)
 
+    def test_extract_and_import_leads_from_pasted_google_maps_text(self) -> None:
+        pasted = """
+        Oficina do Vale
+        Aberto
+        (51) 99999-0001
+        Rua Central, 100
+
+        Mecanica Avenida
+        Fechado
+        +55 51 98888-0002
+        Avenida Brasil, 200
+
+        Mecanica Avenida
+        +55 51 98888-0002
+        """
+
+        leads = self.contacts.extract_leads_from_text(pasted)
+
+        self.assertEqual(len(leads), 2)
+        self.assertEqual(leads[0]["name"], "Oficina do Vale")
+        self.assertEqual(leads[0]["phone"], "5551999990001")
+        self.assertEqual(leads[1]["name"], "Mecanica Avenida")
+        self.assertEqual(leads[1]["phone"], "5551988880002")
+
+        summary = self.contacts.import_leads(leads, folder_name="Leads Maps")
+        self.assertEqual(summary.imported, 2)
+        self.assertEqual(summary.updated, 0)
+        imported = self.contacts.list_contacts_by_folder("Leads Maps")
+        self.assertEqual(len(imported), 2)
+
     def test_campaign_creation_schedule_delay_folder_and_dry_run_send(self) -> None:
         self.whatsapp.save_config(
             self.whatsapp.WhatsAppConfig(
@@ -151,11 +182,63 @@ class DesktopSmokeTests(unittest.TestCase):
 
         sent_campaign = self.campaigns.get_campaign(campaign_id)
         self.assertEqual(sent_campaign["status"], self.campaigns.CAMPAIGN_STATUS_DONE)
+        campaign_contacts = self.campaigns.get_campaign_contacts(campaign_id)
+        self.assertEqual(len(campaign_contacts), 1)
+        self.assertEqual(campaign_contacts[0]["campaign_status"], self.campaigns.CONTACT_STATUS_SIMULATED)
+        listed = next(item for item in self.campaigns.list_campaigns() if int(item["id"]) == campaign_id)
+        self.assertEqual(int(listed["sent_contacts"]), 0)
+        self.assertEqual(int(listed["processed_contacts"]), 1)
+        self.assertEqual(self.campaigns.dashboard_stats()["sent"], 0)
         logs = self.campaigns.list_campaign_logs(campaign_id)
         self.assertEqual(len(logs), 1)
         self.assertEqual(logs[0]["status"], "simulado")
         self.assertTrue(str(logs[0]["provider_message_id"]).startswith("dryrun-"))
         self.assertEqual(logs[0]["delivery_mode"], "official_api")
+
+    def test_duplicate_campaign_for_resend_keeps_content_and_increments_name(self) -> None:
+        contact_a = self.contacts.create_contact(
+            "Cliente A",
+            "+551199990111",
+            group_name="Reenvio",
+            opt_in=1,
+        )
+        contact_b = self.contacts.create_contact(
+            "Cliente B",
+            "+551199990112",
+            group_name="Reenvio",
+            opt_in=1,
+        )
+
+        campaign_id = self.campaigns.create_campaign(
+            name="Promo Maio",
+            message="Ola, oferta da semana.",
+            contact_ids=[contact_a, contact_b],
+            folder_name="Reenvio",
+            delay_min_seconds=30,
+            delay_max_seconds=45,
+            message_variants=["Ola, oferta da semana.", "Ola, oferta especial."],
+        )
+
+        resend_two = self.campaigns.duplicate_campaign_for_resend(campaign_id)
+        resend_three = self.campaigns.duplicate_campaign_for_resend(resend_two)
+
+        duplicated = self.campaigns.get_campaign(resend_two)
+        duplicated_again = self.campaigns.get_campaign(resend_three)
+        self.assertIsNotNone(duplicated)
+        self.assertIsNotNone(duplicated_again)
+        self.assertEqual(duplicated["name"], "Promo Maio + envio 2")
+        self.assertEqual(duplicated_again["name"], "Promo Maio + envio 3")
+        self.assertEqual(duplicated["status"], self.campaigns.CAMPAIGN_STATUS_DRAFT)
+        self.assertEqual(duplicated["folder_name"], "Reenvio")
+        self.assertEqual(duplicated["delay_min_seconds"], 30)
+        self.assertEqual(duplicated["delay_max_seconds"], 45)
+        self.assertEqual(len(self.campaigns.get_campaign_contacts(resend_two)), 2)
+        variants = self.campaigns.get_campaign_variants(resend_two)
+        self.assertGreaterEqual(len(variants), 2)
+        self.assertEqual(
+            self.campaigns.next_resend_campaign_name("Promo Maio"),
+            "Promo Maio + envio 4",
+        )
 
     def test_whatsapp_web_dry_run_never_opens_provider_and_logs_mode(self) -> None:
         self.database.set_setting("block_high_risk_campaigns", "0")
@@ -197,6 +280,29 @@ class DesktopSmokeTests(unittest.TestCase):
         logs = self.campaigns.list_campaign_logs(campaign_id)
         self.assertEqual(logs[0]["status"], "simulado")
         self.assertEqual(logs[0]["delivery_mode"], self.whatsapp.DELIVERY_MODE_WHATSAPP_WEB_EXPERIMENTAL)
+
+    def test_whatsapp_web_provider_wraps_driver_startup_failures(self) -> None:
+        provider = self.whatsapp.WhatsAppWebExperimentalProvider(
+            self.whatsapp.WhatsAppConfig(
+                delivery_mode=self.whatsapp.DELIVERY_MODE_WHATSAPP_WEB_EXPERIMENTAL,
+                dry_run=False,
+            )
+        )
+        attempts: list[str] = []
+
+        def fail_start(browser_name: str) -> object:
+            attempts.append(browser_name)
+            raise self.whatsapp.WhatsAppWebSessionError(f"falha forçada em {browser_name}")
+
+        with mock.patch.object(provider, "_start_browser_driver", side_effect=fail_start):
+            with self.assertRaises(self.whatsapp.WhatsAppWebSessionError) as ctx:
+                provider._ensure_driver()
+
+        self.assertEqual(attempts, ["chrome", "edge"])
+        self.assertIn("Chrome", str(ctx.exception))
+        snapshot = provider.status_snapshot(refresh=False)
+        self.assertEqual(snapshot["status"], self.whatsapp.WEB_STATUS_ERROR)
+        self.assertIn("Edge", snapshot["message"])
 
     def test_whatsapp_web_real_send_requires_explicit_confirmation(self) -> None:
         self.database.set_setting("block_high_risk_campaigns", "0")
@@ -442,4 +548,4 @@ class RBACTests(unittest.TestCase):
 
 
 if __name__ == "__main__":
-    unittest.main()
+    unittest.main()

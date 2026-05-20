@@ -4,6 +4,7 @@ import csv
 import re
 import unicodedata
 import zipfile
+from collections.abc import Iterable
 from dataclasses import dataclass, field
 from pathlib import Path
 from xml.etree import ElementTree
@@ -12,7 +13,23 @@ from database import DEFAULT_CONTACT_FOLDER, connect, now_text, row_to_dict, row
 
 
 PHONE_RE = re.compile(r"\D+")
+LEAD_PHONE_RE = re.compile(r"(?:\+?55[\s().-]*)?(?:\(?\d{2}\)?[\s().-]*)?(?:9?\d{4})[\s().-]?\d{4}")
 XLSX_NS = {"x": "http://schemas.openxmlformats.org/spreadsheetml/2006/main"}
+LEAD_NAME_BLOCKLIST = {
+    "aberto",
+    "agora",
+    "fechado",
+    "telefone",
+    "whatsapp",
+    "site",
+    "rotas",
+    "compartilhar",
+    "salvar",
+    "avaliacoes",
+    "avaliacao",
+    "horarios",
+    "horario",
+}
 
 
 class ContactError(ValueError):
@@ -670,6 +687,98 @@ def import_contacts(path_text: str, folder_name: str = "") -> ImportSummary:
         except ContactError as exc:
             summary.skipped += 1
             summary.errors.append(f"Linha {index}: {exc}")
+            continue
+
+        if updated:
+            summary.updated += 1
+        else:
+            summary.imported += 1
+
+    return summary
+
+
+def _is_probable_lead_name(value: str) -> bool:
+    text = " ".join(str(value or "").split()).strip(" -|")
+    if len(text) < 3:
+        return False
+    lowered = text.casefold()
+    if lowered.startswith(("http://", "https://", "www.")):
+        return False
+    if any(token in lowered for token in LEAD_NAME_BLOCKLIST):
+        return False
+    if LEAD_PHONE_RE.search(text):
+        return False
+    letters = sum(char.isalpha() for char in text)
+    digits = sum(char.isdigit() for char in text)
+    if letters < 3 or digits > max(2, letters):
+        return False
+    return True
+
+
+def _guess_lead_name(lines: list[str], index: int) -> str:
+    for offset in range(1, 6):
+        previous_index = index - offset
+        if previous_index < 0:
+            break
+        candidate = lines[previous_index].strip()
+        if _is_probable_lead_name(candidate):
+            return candidate
+    return ""
+
+
+def extract_leads_from_text(text: str) -> list[dict[str, str]]:
+    lines = [line.strip() for line in str(text or "").splitlines() if line.strip()]
+    found: list[dict[str, str]] = []
+    seen: set[str] = set()
+
+    for index, line in enumerate(lines):
+        for raw_phone in LEAD_PHONE_RE.findall(line):
+            phone = normalize_phone(raw_phone)
+            if not is_valid_phone(phone) or phone in seen:
+                continue
+            seen.add(phone)
+            name = _guess_lead_name(lines, index) or f"Lead {len(found) + 1}"
+            found.append(
+                {
+                    "name": name,
+                    "phone": phone,
+                    "source": line,
+                }
+            )
+
+    return found
+
+
+def import_leads(leads: Iterable[dict[str, object]], folder_name: str = "") -> ImportSummary:
+    summary = ImportSummary()
+    target_folder = normalize_folder_name(folder_name) if folder_name.strip() else DEFAULT_CONTACT_FOLDER
+    seen: set[str] = set()
+
+    for index, lead in enumerate(leads, start=1):
+        name = str(lead.get("name") or "").strip() or f"Lead {index}"
+        phone = normalize_phone(str(lead.get("phone") or ""))
+        if not phone or not is_valid_phone(phone):
+            summary.skipped += 1
+            summary.errors.append(f"Lead {index}: numero invalido.")
+            continue
+        if phone in seen:
+            summary.duplicates += 1
+            continue
+        seen.add(phone)
+
+        try:
+            _, updated = upsert_contact(
+                name=name,
+                phone=phone,
+                group_name=target_folder,
+                opt_in=1,
+                opt_in_source="google_maps",
+                opt_in_category="marketing",
+                consent_notes="Importado da tela Buscar leads.",
+            )
+        except ContactError as exc:
+            summary.skipped += 1
+            summary.errors.append(f"Lead {index}: {exc}")
             continue
 
         if updated:

@@ -68,6 +68,7 @@ def sidebar_labels_for_role(role: str) -> list[str]:
         "Início",
         "Clientes",
         "Importar clientes",
+        "Buscar leads",
         "Nova campanha",
         "Agenda de envios",
         "Conferir risco",
@@ -232,6 +233,7 @@ class MezzoldApp(SettingsScreenMixin, tk.Tk):
             ("Início", self.show_dashboard),
             ("Clientes", self.show_contacts),
             ("Importar clientes", self.show_import_contacts),
+            ("Buscar leads", self.show_search_leads),
             ("Nova campanha", self.show_create_campaign),
             ("Agenda de envios", self.show_schedule),
             ("Conferir risco", self.show_risk),
@@ -1150,6 +1152,154 @@ class MezzoldApp(SettingsScreenMixin, tk.Tk):
 
         ttk.Button(panel, text="Importar clientes", style="Accent.TButton", command=do_import).pack(anchor="w")
 
+    def show_search_leads(self) -> None:
+        frame = self._screen("Buscar leads")
+        panel = ttk.Frame(frame, style="Panel.TFrame", padding=18)
+        panel.pack(fill="both", expand=True)
+
+        instructions = (
+            "Como buscar leads:\n"
+            "1. Abra o Google Maps.\n"
+            "2. Pesquise pelo nicho e cidade desejados.\n"
+            "3. Selecione tudo na pagina (Ctrl+A), copie (Ctrl+C) e cole na caixa abaixo.\n"
+            "4. Clique em Extrair telefones para identificar os numeros.\n"
+            "5. Selecione os leads desejados e importe para uma pasta."
+        )
+        ttk.Label(panel, text=instructions, style="Panel.TLabel", justify="left", wraplength=920).pack(anchor="w")
+
+        top_actions = ttk.Frame(panel, style="Panel.TFrame")
+        top_actions.pack(fill="x", pady=(12, 10))
+        ttk.Button(
+            top_actions,
+            text="Abrir Google Maps no navegador",
+            command=lambda: self._open_external_link("https://www.google.com/maps/search/"),
+        ).pack(side="left")
+
+        folder = tk.StringVar(value=DEFAULT_CONTACT_FOLDER)
+        result = tk.StringVar(value="Cole o conteudo do Google Maps abaixo para extrair os telefones.")
+        source_box = tk.Text(panel, height=12, wrap="word")
+        source_box.pack(fill="both", expand=False, pady=(0, 10))
+
+        def select_all_text(_event: object | None = None) -> str:
+            source_box.tag_add("sel", "1.0", "end-1c")
+            source_box.mark_set("insert", "1.0")
+            source_box.see("insert")
+            return "break"
+
+        source_box.bind("<Control-a>", select_all_text)
+        source_box.bind("<Control-A>", select_all_text)
+
+        folder_row = ttk.Frame(panel, style="Panel.TFrame")
+        folder_row.pack(fill="x", pady=(0, 10))
+        ttk.Label(folder_row, text="Importar para pasta", style="Panel.TLabel").pack(side="left")
+
+        def lead_folder_values() -> list[str]:
+            values = contacts.list_groups()
+            if DEFAULT_CONTACT_FOLDER not in values:
+                values.insert(0, DEFAULT_CONTACT_FOLDER)
+            return values
+
+        folder_combo = ttk.Combobox(folder_row, textvariable=folder, values=lead_folder_values(), state="readonly")
+        folder_combo.pack(side="left", fill="x", expand=True, padx=(8, 8))
+
+        def create_lead_folder() -> None:
+            folder_name = simpledialog.askstring(APP_TITLE, "Nome da nova pasta:", parent=self)
+            if not folder_name:
+                return
+            try:
+                contacts.create_folder(folder_name)
+            except contacts.ContactError as exc:
+                messagebox.showerror(APP_TITLE, str(exc))
+                return
+            folder_combo.configure(values=lead_folder_values())
+            folder.set(folder_name.strip())
+
+        ttk.Button(folder_row, text="Nova pasta", command=create_lead_folder).pack(side="left")
+
+        tree = ttk.Treeview(panel, columns=("name", "phone", "source"), show="headings", selectmode="extended", height=10)
+        for column, heading, width in [
+            ("name", "Nome sugerido", 220),
+            ("phone", "Telefone", 140),
+            ("source", "Trecho encontrado", 520),
+        ]:
+            tree.heading(column, text=heading)
+            tree.column(column, width=width, anchor="w")
+        tree.pack(fill="both", expand=True)
+
+        extracted_by_iid: dict[str, dict[str, object]] = {}
+
+        def refresh_lead_rows(leads: list[dict[str, str]]) -> None:
+            tree.delete(*tree.get_children())
+            extracted_by_iid.clear()
+            for index, lead in enumerate(leads, start=1):
+                iid = str(index)
+                extracted_by_iid[iid] = dict(lead)
+                source_preview = str(lead.get("source") or "")
+                if len(source_preview) > 90:
+                    source_preview = source_preview[:87] + "..."
+                tree.insert(
+                    "",
+                    "end",
+                    iid=iid,
+                    values=(lead.get("name") or "", lead.get("phone") or "", source_preview),
+                )
+
+        def extract_leads() -> None:
+            pasted = source_box.get("1.0", "end").strip()
+            if not pasted:
+                messagebox.showwarning(APP_TITLE, "Cole o conteudo do Google Maps antes de extrair.")
+                return
+            leads = contacts.extract_leads_from_text(pasted)
+            refresh_lead_rows(leads)
+            if not leads:
+                result.set("Nenhum telefone valido foi encontrado nesse conteudo.")
+                self._set_status("Nenhum telefone encontrado na colagem.")
+                return
+            result.set(f"{len(leads)} lead(s) identificado(s). Selecione os que deseja importar.")
+            self._set_status(f"{len(leads)} lead(s) extraido(s) da colagem.")
+
+        def select_all_leads() -> None:
+            children = tree.get_children()
+            if children:
+                tree.selection_set(children)
+
+        def clear_search() -> None:
+            source_box.delete("1.0", "end")
+            refresh_lead_rows([])
+            result.set("Cole o conteudo do Google Maps abaixo para extrair os telefones.")
+            self._set_status("Busca de leads limpa.")
+
+        def import_selected_leads() -> None:
+            selected = tree.selection()
+            if not selected:
+                messagebox.showwarning(APP_TITLE, "Selecione pelo menos um lead para importar.")
+                return
+            payload = [extracted_by_iid[item] for item in selected if item in extracted_by_iid]
+            try:
+                summary = contacts.import_leads(payload, folder_name=folder.get())
+            except contacts.ContactError as exc:
+                messagebox.showerror(APP_TITLE, str(exc))
+                return
+
+            text = (
+                f"Pasta de destino: {folder.get().strip() or DEFAULT_CONTACT_FOLDER}\n"
+                f"Contatos importados: {summary.imported} | Atualizados: {summary.updated} | "
+                f"Duplicados: {summary.duplicates} | Invalidos/ignorados: {summary.skipped}"
+            )
+            if summary.errors:
+                text += f"\nO que revisar primeiro:\n{chr(10).join(summary.errors[:5])}"
+            result.set(text)
+            self._set_status("Leads importados com sucesso.")
+
+        action_row = ttk.Frame(panel, style="Panel.TFrame")
+        action_row.pack(fill="x", pady=(10, 0))
+        ttk.Button(action_row, text="Extrair telefones", style="Accent.TButton", command=extract_leads).pack(side="left")
+        ttk.Button(action_row, text="Selecionar todos", command=select_all_leads).pack(side="left", padx=(8, 0))
+        ttk.Button(action_row, text="Limpar", command=clear_search).pack(side="left", padx=(8, 0))
+        ttk.Button(action_row, text="Importar selecionados", command=import_selected_leads).pack(side="right")
+
+        ttk.Label(panel, textvariable=result, style="Muted.TLabel", wraplength=920, justify="left").pack(anchor="w", pady=(12, 0))
+
     def show_create_campaign(self) -> None:
         return self._show_create_campaign_by_folder()
 
@@ -1599,6 +1749,8 @@ class MezzoldApp(SettingsScreenMixin, tk.Tk):
         refresh_button.pack(side="left")
         open_button = ttk.Button(top, text="Abrir campanha")
         open_button.pack(side="left", padx=(8, 0))
+        resend_button = ttk.Button(top, text="Reenviar")
+        resend_button.pack(side="left", padx=(8, 0))
         send_button = ttk.Button(top, text="Iniciar agora", style="Accent.TButton")
         send_button.pack(side="left", padx=(8, 0))
         schedule_button = ttk.Button(top, text="Agendar")
@@ -1797,6 +1949,19 @@ class MezzoldApp(SettingsScreenMixin, tk.Tk):
             if campaign_id:
                 self._start_campaign_thread(campaign_id, progress, source="ui_manual")
 
+        def resend_campaign() -> None:
+            campaign_id = selected_campaign_id()
+            if not campaign_id:
+                return
+            try:
+                new_campaign_id = campaigns.duplicate_campaign_for_resend(campaign_id)
+            except campaigns.CampaignError as exc:
+                messagebox.showerror(APP_TITLE, str(exc))
+                return
+            refresh(new_campaign_id)
+            duplicated = campaigns.get_campaign(new_campaign_id) or {}
+            self._set_status(f"Campanha duplicada para reenvio: {duplicated.get('name') or new_campaign_id}.")
+
         def continue_campaign() -> None:
             campaign_id = selected_campaign_id()
             if campaign_id:
@@ -1992,6 +2157,7 @@ class MezzoldApp(SettingsScreenMixin, tk.Tk):
         tree.bind("<<TreeviewSelect>>", on_select)
         refresh_button.configure(command=refresh)
         open_button.configure(command=open_campaign)
+        resend_button.configure(command=resend_campaign)
         send_button.configure(command=send_now)
         schedule_button.configure(command=schedule_selected)
         pause_button.configure(command=pause)

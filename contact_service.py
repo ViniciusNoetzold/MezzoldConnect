@@ -199,6 +199,14 @@ def import_contacts(path_text: str, folder_name: str = "") -> ImportSummary:
     return contacts.import_contacts(path_text, folder_name=folder_name)
 
 
+def extract_leads_from_text(text: str) -> list[dict[str, str]]:
+    return contacts.extract_leads_from_text(text)
+
+
+def import_leads(leads: list[dict[str, object]], folder_name: str = "") -> ImportSummary:
+    return contacts.import_leads(leads, folder_name=folder_name)
+
+
 def list_used_phones(limit: int = 1000) -> list[dict[str, Any]]:
     from campaigns import list_sent_numbers
 
