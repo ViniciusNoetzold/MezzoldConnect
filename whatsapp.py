@@ -631,13 +631,12 @@ class WhatsAppWebExperimentalProvider:
         selectors = [
             (By.CSS_SELECTOR, "button[aria-label='Send']"),
             (By.CSS_SELECTOR, "button[aria-label='Enviar']"),
-            (By.XPATH, "//span[@data-icon='send']/ancestor::button"),
+            (By.XPATH, "//span[@data-icon='send']/ancestor::*[@role='button' or self::button][1]"),
+            (By.XPATH, "//*[@data-icon='send']/ancestor::*[@role='button' or self::button][1]"),
+            (By.XPATH, "//*[@data-icon='wds-ic-send-filled']/ancestor::*[@role='button' or self::button][1]"),
         ]
 
         def find_button(current_driver: Any) -> Any:
-            status, _message = self._page_state(current_driver)
-            if status != WEB_STATUS_CONNECTED:
-                raise WhatsAppWebSessionError("WhatsApp Web saiu do estado conectado.")
             for by, selector in selectors:
                 for element in current_driver.find_elements(by, selector):
                     if element.is_displayed() and element.is_enabled():
@@ -648,8 +647,10 @@ class WhatsAppWebExperimentalProvider:
             return WebDriverWait(driver, 45).until(find_button)
         except TimeoutException as exc:
             status, _message = self._safe_page_state(driver)
-            if status != WEB_STATUS_CONNECTED:
+            if status == WEB_STATUS_WAITING_QR:
                 raise WhatsAppWebSessionError("WhatsApp Web desconectou antes do envio.") from exc
+            if status == WEB_STATUS_DISCONNECTED:
+                raise WhatsAppWebSessionError("WhatsApp Web saiu do estado conectado.") from exc
             raise WhatsAppAPIError(
                 "Nao encontrei o botao de enviar no WhatsApp Web. Confira o numero e a conversa aberta."
             ) from exc
@@ -658,6 +659,10 @@ class WhatsAppWebExperimentalProvider:
         from selenium.webdriver.common.by import By
 
         if driver.find_elements(By.CSS_SELECTOR, "#pane-side"):
+            return WEB_STATUS_CONNECTED, "WhatsApp Web conectado neste computador."
+        if driver.find_elements(By.CSS_SELECTOR, "footer"):
+            return WEB_STATUS_CONNECTED, "WhatsApp Web conectado neste computador."
+        if driver.find_elements(By.CSS_SELECTOR, "div[contenteditable='true']"):
             return WEB_STATUS_CONNECTED, "WhatsApp Web conectado neste computador."
         if driver.find_elements(By.CSS_SELECTOR, "canvas"):
             return WEB_STATUS_WAITING_QR, "Aguardando leitura do QR Code no WhatsApp Web."
