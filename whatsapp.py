@@ -265,6 +265,18 @@ class WhatsAppBusinessClient:
                 delivery_mode=delivery_mode,
             )
 
+        _media_path_val = str(campaign.get("media_path") or "")
+        if (
+            _media_path_val
+            and not _media_path_val.startswith(("http://", "https://"))
+            and delivery_mode == DELIVERY_MODE_OFFICIAL_API
+            and not self.config.dry_run
+        ):
+            raise WhatsAppAPIError(
+                "Para envio real com imagem via API Oficial, o arquivo precisa estar hospedado em um link público (https://). "
+                "No modo simulação, a imagem local é registrada normalmente."
+            )
+
         if delivery_mode == DELIVERY_MODE_MANUAL_ASSISTED:
             return SendResult(
                 status="pendente_manual",
@@ -528,12 +540,19 @@ class WhatsAppWebExperimentalProvider:
         service = BrowserService(executable_path=driver_path)
         try:
             if browser_name == "chrome":
-                return webdriver.Chrome(service=service, options=options)
-            return webdriver.Edge(service=service, options=options)
+                driver = webdriver.Chrome(service=service, options=options)
+            else:
+                driver = webdriver.Edge(service=service, options=options)
         except Exception as exc:
             raise WhatsAppWebSessionError(
                 f"Nao consegui iniciar o {_browser_label(browser_name)}: {exc}"
             ) from exc
+        try:
+            import app_log
+            app_log.chrome_opened()
+        except Exception:
+            pass
+        return driver
 
     def _resolve_browser_paths(self, browser_name: str) -> tuple[str, str]:
         try:
@@ -601,6 +620,13 @@ class WhatsAppWebExperimentalProvider:
             lambda current_driver: self._page_state(current_driver)[0]
             in {WEB_STATUS_WAITING_QR, WEB_STATUS_CONNECTED}
         )
+        state, _ = self._safe_page_state(driver)
+        if state == WEB_STATUS_WAITING_QR:
+            try:
+                import app_log
+                app_log.whatsapp_qr_needed()
+            except Exception:
+                pass
 
     def _wait_until_connected(self, driver: Any) -> None:
         try:
@@ -613,9 +639,19 @@ class WhatsAppWebExperimentalProvider:
             WebDriverWait(driver, 60).until(
                 lambda current_driver: self._page_state(current_driver)[0] == WEB_STATUS_CONNECTED
             )
+            try:
+                import app_log
+                app_log.whatsapp_connected()
+            except Exception:
+                pass
         except TimeoutException as exc:
             status, message = self._safe_page_state(driver)
             self._set_status(status, message)
+            try:
+                import app_log
+                app_log.whatsapp_disconnected()
+            except Exception:
+                pass
             raise WhatsAppWebSessionError(
                 "WhatsApp Web nao esta conectado. Abra Configuracoes, conecte pelo QR Code e tente novamente."
             ) from exc

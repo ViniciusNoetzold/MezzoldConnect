@@ -10,7 +10,7 @@ from typing import Any, Iterable
 
 
 APP_TITLE = "Mezzold Connect"
-APP_VERSION = "1.0.2"
+APP_VERSION = "1.0.3"
 APP_DOWNLOAD_URL = "https://github.com/ViniciusNoetzold/MezzoldConnect/releases"
 DEFAULT_CONTACT_FOLDER = "Importados"
 
@@ -69,11 +69,7 @@ def initialize_database() -> None:
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 username TEXT NOT NULL UNIQUE,
                 password_hash TEXT NOT NULL,
-                role TEXT NOT NULL DEFAULT 'cliente',
-                is_active INTEGER NOT NULL DEFAULT 1,
-                must_change_password INTEGER NOT NULL DEFAULT 0,
                 created_at TEXT NOT NULL,
-                updated_at TEXT,
                 last_login_at TEXT
             );
 
@@ -275,17 +271,13 @@ def initialize_database() -> None:
         _ensure_column(conn, "campaigns", "risk_score", "INTEGER NOT NULL DEFAULT 0")
         _ensure_column(conn, "campaigns", "risk_level", "TEXT DEFAULT 'pendente'")
         _ensure_column(conn, "campaigns", "risk_notes", "TEXT DEFAULT ''")
+        _ensure_column(conn, "campaigns", "image_path", "TEXT DEFAULT ''")
+        _ensure_column(conn, "campaigns", "security_preset", "TEXT NOT NULL DEFAULT 'Moderado'")
+        _ensure_column(conn, "users", "role", "TEXT NOT NULL DEFAULT 'user'")
         _ensure_column(conn, "message_logs", "action_url", "TEXT DEFAULT ''")
         _ensure_column(conn, "message_logs", "delivery_mode", "TEXT NOT NULL DEFAULT 'official_api'")
         _ensure_column(conn, "message_logs", "message_body", "TEXT DEFAULT ''")
         _ensure_column(conn, "message_logs", "media_path", "TEXT DEFAULT ''")
-        _ensure_column(conn, "users", "role", "TEXT NOT NULL DEFAULT 'cliente'")
-        _ensure_column(conn, "users", "is_active", "INTEGER NOT NULL DEFAULT 1")
-        _ensure_column(conn, "users", "must_change_password", "INTEGER NOT NULL DEFAULT 0")
-        _ensure_column(conn, "users", "updated_at", "TEXT")
-        conn.execute(
-            "UPDATE users SET role = 'cliente' WHERE COALESCE(TRIM(role), '') = ''"
-        )
         _migrate_contact_folders(conn)
 
         defaults = {

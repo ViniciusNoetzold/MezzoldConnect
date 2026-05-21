@@ -152,6 +152,7 @@ class SettingsScreenMixin:
         rampup_daily_floor = tk.StringVar(value=get_setting("rampup_daily_floor", "5"))
         internet_status = tk.StringVar(value="Internet: ainda não testada.")
         start_with_windows = tk.BooleanVar(value=startup.is_startup_enabled())
+        start_minimized_tray = tk.BooleanVar(value=startup.is_startup_minimized())
         startup_status = "Disponível neste Windows." if startup.is_supported() else "Disponível apenas no Windows."
 
         theme_options = {"Claro": "light", "Escuro": "dark"}
@@ -305,8 +306,21 @@ class SettingsScreenMixin:
         ttk.Label(startup_block, text=startup_status, style="Muted.TLabel", wraplength=500).pack(anchor="w", pady=(4, 0))
         startup_check = ttk.Checkbutton(startup_block, text="Começar sozinho quando ligar o computador", variable=start_with_windows)
         startup_check.pack(anchor="w", pady=(10, 0))
+        minimized_check = ttk.Checkbutton(
+            startup_block,
+            text="Iniciar minimizado na bandeja do sistema (requer pystray e Pillow)",
+            variable=start_minimized_tray,
+        )
+        minimized_check.pack(anchor="w", pady=(6, 0))
+        ttk.Label(
+            startup_block,
+            text="Quando marcado, o app abre com ícone na bandeja em vez de janela visível.",
+            style="Muted.TLabel",
+            wraplength=500,
+        ).pack(anchor="w", pady=(2, 0))
         if not startup.is_supported():
             startup_check.configure(state="disabled")
+            minimized_check.configure(state="disabled")
 
         if can_advanced:
             rampup_block = section(right, "Aquecimento")
@@ -440,7 +454,10 @@ class SettingsScreenMixin:
                     set_setting("app_update_channel", update_channel.get().strip() or app_update.DEFAULT_CHANNEL)
                 set_setting("block_high_risk_campaigns", "1" if block_high_risk.get() else "0")
                 if startup.is_supported():
-                    startup.set_startup_enabled(start_with_windows.get())
+                    startup.set_startup_enabled(
+                        start_with_windows.get(),
+                        minimized=start_minimized_tray.get(),
+                    )
                 elif start_with_windows.get():
                     raise RuntimeError("Inicialização automática está disponível apenas no Windows.")
                 if can_advanced:
