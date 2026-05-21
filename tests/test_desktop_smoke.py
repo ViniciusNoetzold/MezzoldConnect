@@ -8,6 +8,7 @@ import tempfile
 import unittest
 import zipfile
 from pathlib import Path
+from types import SimpleNamespace
 from unittest import mock
 
 
@@ -303,6 +304,24 @@ class DesktopSmokeTests(unittest.TestCase):
         snapshot = provider.status_snapshot(refresh=False)
         self.assertEqual(snapshot["status"], self.whatsapp.WEB_STATUS_ERROR)
         self.assertIn("Edge", snapshot["message"])
+
+    def test_selenium_chrome_modules_import_for_whatsapp_web(self) -> None:
+        from selenium.webdriver.chrome.options import Options as ChromeOptions
+        from selenium.webdriver.chrome.service import Service as ChromeService
+        from selenium.webdriver.common.by import By
+        from selenium.webdriver.support import expected_conditions
+        from selenium.webdriver.support.ui import WebDriverWait
+
+        self.assertIsNotNone(ChromeOptions)
+        self.assertIsNotNone(ChromeService)
+        self.assertEqual(By.CSS_SELECTOR, "css selector")
+        self.assertIsNotNone(expected_conditions)
+        self.assertIsNotNone(WebDriverWait)
+
+    def test_pyinstaller_spec_collects_selenium_package(self) -> None:
+        spec_text = Path("Mezzold Connect.spec").read_text(encoding="utf-8")
+        self.assertIn("collect_submodules('selenium')", spec_text)
+        self.assertIn("collect_data_files('selenium')", spec_text)
 
     def test_whatsapp_web_page_state_accepts_loaded_composer_as_connected(self) -> None:
         provider = self.whatsapp.WhatsAppWebExperimentalProvider()
@@ -632,6 +651,13 @@ class RBACTests(unittest.TestCase):
         flags = self.settings_mod.settings_flags_for_role(self.auth_mod.ROLE_ADMIN)
         self.assertTrue(flags["advanced"])
         self.assertTrue(flags["technical"])
+
+    def test_mousewheel_scroll_units_support_windows_and_button_events(self) -> None:
+        self.assertEqual(self.ui_mod.mousewheel_scroll_units(SimpleNamespace(delta=120)), -1)
+        self.assertEqual(self.ui_mod.mousewheel_scroll_units(SimpleNamespace(delta=-120)), 1)
+        self.assertEqual(self.ui_mod.mousewheel_scroll_units(SimpleNamespace(delta=40)), -1)
+        self.assertEqual(self.ui_mod.mousewheel_scroll_units(SimpleNamespace(num=4)), -1)
+        self.assertEqual(self.ui_mod.mousewheel_scroll_units(SimpleNamespace(num=5)), 1)
 
 
 if __name__ == "__main__":
