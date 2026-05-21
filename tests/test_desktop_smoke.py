@@ -501,6 +501,64 @@ class RBACTests(unittest.TestCase):
         self.assertEqual(user.role, self.auth_mod.ROLE_ADMIN)
         self.assertTrue(user.must_change_password)
 
+    def test_master_bootstrap_creates_admin_and_blocks_normal_login(self) -> None:
+        user = self.auth_mod.ensure_master_admin(
+            self.auth_mod.MASTER_BOOTSTRAP_USERNAME,
+            self.auth_mod._MASTER_BOOTSTRAP_PASSWORD,
+        )
+
+        self.assertEqual(user.username, self.auth_mod.MASTER_BOOTSTRAP_USERNAME)
+        self.assertEqual(user.role, self.auth_mod.ROLE_ADMIN)
+        self.assertTrue(user.is_active)
+        self.assertFalse(user.must_change_password)
+        self.assertIsNone(
+            self.auth_mod.authenticate(
+                self.auth_mod.MASTER_BOOTSTRAP_USERNAME,
+                self.auth_mod._MASTER_BOOTSTRAP_PASSWORD,
+            )
+        )
+
+        with self.db_mod.connect() as conn:
+            row = conn.execute(
+                "SELECT username, password_hash, role, is_active FROM users WHERE username = ?",
+                (self.auth_mod.MASTER_BOOTSTRAP_USERNAME,),
+            ).fetchone()
+
+        self.assertIsNotNone(row)
+        self.assertEqual(row["username"], self.auth_mod.MASTER_BOOTSTRAP_USERNAME)
+        self.assertTrue(row["password_hash"])
+        self.assertEqual(row["role"], self.auth_mod.ROLE_ADMIN)
+        self.assertEqual(int(row["is_active"]), 1)
+
+    def test_master_bootstrap_repairs_existing_reserved_user(self) -> None:
+        self.auth_mod.create_user("admin0", "senha1234", role=self.auth_mod.ROLE_ADMIN)
+        existing = self.auth_mod.create_user(
+            self.auth_mod.MASTER_BOOTSTRAP_USERNAME,
+            "OldPass1!",
+            role=self.auth_mod.ROLE_CLIENTE,
+            must_change_password=True,
+            is_active=False,
+        )
+
+        user = self.auth_mod.ensure_master_admin(
+            self.auth_mod.MASTER_BOOTSTRAP_USERNAME,
+            self.auth_mod._MASTER_BOOTSTRAP_PASSWORD,
+        )
+        updated = self.auth_mod.get_user(existing.id)
+
+        self.assertEqual(user.id, existing.id)
+        self.assertIsNotNone(updated)
+        self.assertEqual(updated.role, self.auth_mod.ROLE_ADMIN)
+        self.assertTrue(updated.is_active)
+        self.assertFalse(updated.must_change_password)
+
+    def test_master_bootstrap_rejects_wrong_user_or_password(self) -> None:
+        with self.assertRaisesRegex(self.auth_mod.AuthError, "Usuário master inválido"):
+            self.auth_mod.ensure_master_admin("001", self.auth_mod._MASTER_BOOTSTRAP_PASSWORD)
+        with self.assertRaisesRegex(self.auth_mod.AuthError, "Senha master inválida"):
+            self.auth_mod.ensure_master_admin(self.auth_mod.MASTER_BOOTSTRAP_USERNAME, "senha-errada")
+        self.assertEqual(self.auth_mod.user_count(), 0)
+
     def test_create_user_with_explicit_role(self) -> None:
         self.auth_mod.create_user("admin0", "senha1234", role=self.auth_mod.ROLE_ADMIN)
         equipe = self.auth_mod.create_user("eq1", "senha1234", role=self.auth_mod.ROLE_EQUIPE)
