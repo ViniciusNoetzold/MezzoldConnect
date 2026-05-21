@@ -536,7 +536,7 @@ class WhatsAppWebExperimentalProvider:
             ) from exc
 
         driver_path, browser_path = self._resolve_browser_paths(browser_name)
-        options = self._build_browser_options(webdriver, browser_name, browser_path)
+        options = self._build_browser_options(browser_name, browser_path)
         service = BrowserService(executable_path=driver_path)
         try:
             if browser_name == "chrome":
@@ -583,13 +583,20 @@ class WhatsAppWebExperimentalProvider:
         )
         return driver_path, browser_path
 
-    def _build_browser_options(self, webdriver_module: Any, browser_name: str, browser_path: str) -> Any:
+    def _build_browser_options(self, browser_name: str, browser_path: str) -> Any:
         self._profile_dir = WEB_PROFILE_DIR / browser_name
         self._profile_dir.mkdir(parents=True, exist_ok=True)
-        if browser_name == "chrome":
-            options = webdriver_module.ChromeOptions()
-        else:
-            options = webdriver_module.EdgeOptions()
+        try:
+            if browser_name == "chrome":
+                from selenium.webdriver.chrome.options import Options as BrowserOptions
+            else:
+                from selenium.webdriver.edge.options import Options as BrowserOptions
+        except ImportError as exc:
+            raise WhatsAppWebSessionError(
+                "Biblioteca selenium incompleta para configurar o navegador local."
+            ) from exc
+
+        options = BrowserOptions()
         options.binary_location = browser_path
         for argument in (
             f"--user-data-dir={self._profile_dir}",

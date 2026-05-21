@@ -59,6 +59,22 @@ ROLE_LABELS = {
 }
 
 
+def mousewheel_scroll_units(event: object) -> int:
+    button = int(getattr(event, "num", 0) or 0)
+    if button == 4:
+        return -1
+    if button == 5:
+        return 1
+
+    delta = int(getattr(event, "delta", 0) or 0)
+    if delta == 0:
+        return 0
+    units = int(-delta / 120)
+    if units == 0:
+        units = -1 if delta > 0 else 1
+    return units
+
+
 def friendly_status(value: object) -> str:
     text = str(value or "").strip()
     return STATUS_LABELS.get(text, text)
@@ -99,6 +115,8 @@ class MezzoldApp(SettingsScreenMixin, tk.Tk):
         self._tray_manager: tray_icon.TrayIconManager | None = None
         self._quitting = False
         self._start_minimized = start_minimized
+        self._active_scroll_canvas: tk.Canvas | None = None
+        self._mousewheel_bound = False
 
         self._configure_style()
         self.show_login()
@@ -334,6 +352,8 @@ class MezzoldApp(SettingsScreenMixin, tk.Tk):
         scrollbar = ttk.Scrollbar(parent, orient="vertical", command=canvas.yview)
         inner = ttk.Frame(canvas)
         window_id = canvas.create_window((0, 0), window=inner, anchor="nw")
+        self._active_scroll_canvas = canvas
+        self._ensure_mousewheel_binding()
 
         def configure_inner(_event: object | None = None) -> None:
             canvas.configure(scrollregion=canvas.bbox("all"))
@@ -341,12 +361,50 @@ class MezzoldApp(SettingsScreenMixin, tk.Tk):
         def configure_canvas(event: tk.Event) -> None:
             canvas.itemconfigure(window_id, width=event.width)
 
+        def activate_scroll(_event: object | None = None) -> None:
+            self._active_scroll_canvas = canvas
+
         inner.bind("<Configure>", configure_inner)
+        inner.bind("<Enter>", activate_scroll)
         canvas.bind("<Configure>", configure_canvas)
+        canvas.bind("<Enter>", activate_scroll)
         canvas.configure(yscrollcommand=scrollbar.set)
         canvas.pack(side="left", fill="both", expand=True)
         scrollbar.pack(side="right", fill="y")
         return inner
+
+    def _ensure_mousewheel_binding(self) -> None:
+        if self._mousewheel_bound:
+            return
+        self.bind_all("<MouseWheel>", self._on_global_mousewheel, add="+")
+        self.bind_all("<Button-4>", self._on_global_mousewheel, add="+")
+        self.bind_all("<Button-5>", self._on_global_mousewheel, add="+")
+        self._mousewheel_bound = True
+
+    def _on_global_mousewheel(self, event: tk.Event) -> str | None:
+        canvas = self._active_scroll_canvas
+        if canvas is None:
+            return None
+        try:
+            if not canvas.winfo_exists() or not self._pointer_inside_widget(canvas):
+                return None
+            if canvas.yview() == (0.0, 1.0):
+                return None
+            units = mousewheel_scroll_units(event)
+            if units:
+                canvas.yview_scroll(units, "units")
+                return "break"
+        except tk.TclError:
+            self._active_scroll_canvas = None
+        return None
+
+    def _pointer_inside_widget(self, widget: tk.Widget) -> bool:
+        pointer_x, pointer_y = self.winfo_pointerxy()
+        left = widget.winfo_rootx()
+        top = widget.winfo_rooty()
+        right = left + widget.winfo_width()
+        bottom = top + widget.winfo_height()
+        return left <= pointer_x <= right and top <= pointer_y <= bottom
 
     def _entry(self, parent: tk.Widget, label: str, variable: tk.StringVar, show: str | None = None) -> ttk.Frame:
         frame = ttk.Frame(parent, style="Panel.TFrame")
