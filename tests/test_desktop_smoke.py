@@ -8,19 +8,7 @@ import tempfile
 import unittest
 import zipfile
 from pathlib import Path
-
-
-_HAS_DISPLAY = True
-try:
-    import tkinter as _tk
-    _root = _tk.Tk()
-    _root.withdraw()
-    _root.destroy()
-    del _root, _tk
-except Exception:
-    _HAS_DISPLAY = False
-
-_requires_display = unittest.skipUnless(_HAS_DISPLAY, "tkinter display not available")
+from unittest import mock
 
 
 APP_MODULES = (
@@ -75,7 +63,6 @@ class DesktopSmokeTests(unittest.TestCase):
         self.assertEqual(self.database.get_setting("app_update_channel"), "beta")
         self.assertEqual(self.database.get_setting("app_current_version"), self.database.APP_VERSION)
 
-    @_requires_display
     def test_settings_screen_presets_preserve_custom_values(self) -> None:
         settings = importlib.import_module("screens.settings")
 
@@ -124,6 +111,36 @@ class DesktopSmokeTests(unittest.TestCase):
         self.assertIn("Leads Manuais", folder_names)
         self.assertIn("Leads CSV", folder_names)
 
+    def test_extract_and_import_leads_from_pasted_google_maps_text(self) -> None:
+        pasted = """
+        Oficina do Vale
+        Aberto
+        (51) 99999-0001
+        Rua Central, 100
+
+        Mecanica Avenida
+        Fechado
+        +55 51 98888-0002
+        Avenida Brasil, 200
+
+        Mecanica Avenida
+        +55 51 98888-0002
+        """
+
+        leads = self.contacts.extract_leads_from_text(pasted)
+
+        self.assertEqual(len(leads), 2)
+        self.assertEqual(leads[0]["name"], "Oficina do Vale")
+        self.assertEqual(leads[0]["phone"], "5551999990001")
+        self.assertEqual(leads[1]["name"], "Mecanica Avenida")
+        self.assertEqual(leads[1]["phone"], "5551988880002")
+
+        summary = self.contacts.import_leads(leads, folder_name="Leads Maps")
+        self.assertEqual(summary.imported, 2)
+        self.assertEqual(summary.updated, 0)
+        imported = self.contacts.list_contacts_by_folder("Leads Maps")
+        self.assertEqual(len(imported), 2)
+
     def test_campaign_creation_schedule_delay_folder_and_dry_run_send(self) -> None:
         self.whatsapp.save_config(
             self.whatsapp.WhatsAppConfig(
@@ -165,11 +182,63 @@ class DesktopSmokeTests(unittest.TestCase):
 
         sent_campaign = self.campaigns.get_campaign(campaign_id)
         self.assertEqual(sent_campaign["status"], self.campaigns.CAMPAIGN_STATUS_DONE)
+        campaign_contacts = self.campaigns.get_campaign_contacts(campaign_id)
+        self.assertEqual(len(campaign_contacts), 1)
+        self.assertEqual(campaign_contacts[0]["campaign_status"], self.campaigns.CONTACT_STATUS_SIMULATED)
+        listed = next(item for item in self.campaigns.list_campaigns() if int(item["id"]) == campaign_id)
+        self.assertEqual(int(listed["sent_contacts"]), 0)
+        self.assertEqual(int(listed["processed_contacts"]), 1)
+        self.assertEqual(self.campaigns.dashboard_stats()["sent"], 0)
         logs = self.campaigns.list_campaign_logs(campaign_id)
         self.assertEqual(len(logs), 1)
         self.assertEqual(logs[0]["status"], "simulado")
         self.assertTrue(str(logs[0]["provider_message_id"]).startswith("dryrun-"))
         self.assertEqual(logs[0]["delivery_mode"], "official_api")
+
+    def test_duplicate_campaign_for_resend_keeps_content_and_increments_name(self) -> None:
+        contact_a = self.contacts.create_contact(
+            "Cliente A",
+            "+551199990111",
+            group_name="Reenvio",
+            opt_in=1,
+        )
+        contact_b = self.contacts.create_contact(
+            "Cliente B",
+            "+551199990112",
+            group_name="Reenvio",
+            opt_in=1,
+        )
+
+        campaign_id = self.campaigns.create_campaign(
+            name="Promo Maio",
+            message="Ola, oferta da semana.",
+            contact_ids=[contact_a, contact_b],
+            folder_name="Reenvio",
+            delay_min_seconds=30,
+            delay_max_seconds=45,
+            message_variants=["Ola, oferta da semana.", "Ola, oferta especial."],
+        )
+
+        resend_two = self.campaigns.duplicate_campaign_for_resend(campaign_id)
+        resend_three = self.campaigns.duplicate_campaign_for_resend(resend_two)
+
+        duplicated = self.campaigns.get_campaign(resend_two)
+        duplicated_again = self.campaigns.get_campaign(resend_three)
+        self.assertIsNotNone(duplicated)
+        self.assertIsNotNone(duplicated_again)
+        self.assertEqual(duplicated["name"], "Promo Maio + envio 2")
+        self.assertEqual(duplicated_again["name"], "Promo Maio + envio 3")
+        self.assertEqual(duplicated["status"], self.campaigns.CAMPAIGN_STATUS_DRAFT)
+        self.assertEqual(duplicated["folder_name"], "Reenvio")
+        self.assertEqual(duplicated["delay_min_seconds"], 30)
+        self.assertEqual(duplicated["delay_max_seconds"], 45)
+        self.assertEqual(len(self.campaigns.get_campaign_contacts(resend_two)), 2)
+        variants = self.campaigns.get_campaign_variants(resend_two)
+        self.assertGreaterEqual(len(variants), 2)
+        self.assertEqual(
+            self.campaigns.next_resend_campaign_name("Promo Maio"),
+            "Promo Maio + envio 4",
+        )
 
     def test_whatsapp_web_dry_run_never_opens_provider_and_logs_mode(self) -> None:
         self.database.set_setting("block_high_risk_campaigns", "0")
@@ -211,6 +280,58 @@ class DesktopSmokeTests(unittest.TestCase):
         logs = self.campaigns.list_campaign_logs(campaign_id)
         self.assertEqual(logs[0]["status"], "simulado")
         self.assertEqual(logs[0]["delivery_mode"], self.whatsapp.DELIVERY_MODE_WHATSAPP_WEB_EXPERIMENTAL)
+
+    def test_whatsapp_web_provider_wraps_driver_startup_failures(self) -> None:
+        provider = self.whatsapp.WhatsAppWebExperimentalProvider(
+            self.whatsapp.WhatsAppConfig(
+                delivery_mode=self.whatsapp.DELIVERY_MODE_WHATSAPP_WEB_EXPERIMENTAL,
+                dry_run=False,
+            )
+        )
+        attempts: list[str] = []
+
+        def fail_start(browser_name: str) -> object:
+            attempts.append(browser_name)
+            raise self.whatsapp.WhatsAppWebSessionError(f"falha forçada em {browser_name}")
+
+        with mock.patch.object(provider, "_start_browser_driver", side_effect=fail_start):
+            with self.assertRaises(self.whatsapp.WhatsAppWebSessionError) as ctx:
+                provider._ensure_driver()
+
+        self.assertEqual(attempts, ["chrome", "edge"])
+        self.assertIn("Chrome", str(ctx.exception))
+        snapshot = provider.status_snapshot(refresh=False)
+        self.assertEqual(snapshot["status"], self.whatsapp.WEB_STATUS_ERROR)
+        self.assertIn("Edge", snapshot["message"])
+
+    def test_whatsapp_web_page_state_accepts_loaded_composer_as_connected(self) -> None:
+        provider = self.whatsapp.WhatsAppWebExperimentalProvider()
+
+        class FakeElement:
+            def is_displayed(self) -> bool:
+                return True
+
+            def is_enabled(self) -> bool:
+                return True
+
+        class FakeDriver:
+            def find_elements(self, _by: object, selector: str) -> list[object]:
+                if selector == "#pane-side":
+                    return []
+                if selector == "footer":
+                    return [FakeElement()]
+                if selector == "canvas":
+                    return []
+                if selector == "div[contenteditable='true']":
+                    return []
+                return []
+
+            def find_element(self, _by: object, _selector: str) -> object:
+                raise RuntimeError("body not needed")
+
+        status, message = provider._page_state(FakeDriver())
+        self.assertEqual(status, self.whatsapp.WEB_STATUS_CONNECTED)
+        self.assertIn("conectado", message)
 
     def test_whatsapp_web_real_send_requires_explicit_confirmation(self) -> None:
         self.database.set_setting("block_high_risk_campaigns", "0")
@@ -349,6 +470,110 @@ class DesktopSmokeTests(unittest.TestCase):
         )
         with zipfile.ZipFile(path, "w") as archive:
             archive.writestr("xl/worksheets/sheet1.xml", sheet_xml)
+
+
+class RBACTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls) -> None:
+        cls.temp_root = Path(tempfile.mkdtemp(prefix="mezzold-rbac-"))
+        cls.data_dir = cls.temp_root / "data"
+        cls.db_path = cls.data_dir / "mezzold_rbac_test.sqlite3"
+        os.environ["MEZZOLD_DATA_DIR"] = str(cls.data_dir)
+        os.environ["MEZZOLD_DB_PATH"] = str(cls.db_path)
+        for mod in ("database", "auth"):
+            sys.modules.pop(mod, None)
+        cls.db_mod = importlib.import_module("database")
+        cls.auth_mod = importlib.import_module("auth")
+        cls.ui_mod = importlib.import_module("ui")
+        cls.settings_mod = importlib.import_module("screens.settings")
+
+    @classmethod
+    def tearDownClass(cls) -> None:
+        shutil.rmtree(cls.temp_root, ignore_errors=True)
+
+    def setUp(self) -> None:
+        if self.db_path.exists():
+            self.db_path.unlink()
+        self.db_mod.initialize_database()
+
+    def test_first_user_becomes_admin_with_forced_password_change(self) -> None:
+        user = self.auth_mod.create_user("superadmin", "senha1234")
+        self.assertEqual(user.role, self.auth_mod.ROLE_ADMIN)
+        self.assertTrue(user.must_change_password)
+
+    def test_create_user_with_explicit_role(self) -> None:
+        self.auth_mod.create_user("admin0", "senha1234", role=self.auth_mod.ROLE_ADMIN)
+        equipe = self.auth_mod.create_user("eq1", "senha1234", role=self.auth_mod.ROLE_EQUIPE)
+        cliente = self.auth_mod.create_user("cl1", "senha1234", role=self.auth_mod.ROLE_CLIENTE)
+        self.assertEqual(equipe.role, self.auth_mod.ROLE_EQUIPE)
+        self.assertEqual(cliente.role, self.auth_mod.ROLE_CLIENTE)
+
+    def test_authenticate_returns_correct_role_and_blocks_inactive(self) -> None:
+        self.auth_mod.create_user("admin0", "senha1234", role=self.auth_mod.ROLE_ADMIN)
+        eq = self.auth_mod.create_user("eq1", "senha1234", role=self.auth_mod.ROLE_EQUIPE)
+        self.auth_mod.deactivate_user(eq.id)
+        result = self.auth_mod.authenticate("eq1", "senha1234")
+        self.assertIsNone(result, "Inactive user must not authenticate")
+        adm = self.auth_mod.authenticate("admin0", "senha1234")
+        self.assertIsNotNone(adm)
+        self.assertEqual(adm.role, self.auth_mod.ROLE_ADMIN)
+
+    def test_password_change_clears_must_change_flag(self) -> None:
+        user = self.auth_mod.create_user("changer", "OldPass1!", must_change_password=True)
+        self.assertTrue(user.must_change_password)
+        self.auth_mod.change_password(user.id, "OldPass1!", "NewPass2!")
+        updated = self.auth_mod.get_user(user.id)
+        self.assertIsNotNone(updated)
+        self.assertFalse(updated.must_change_password)
+
+    def test_reset_password_sets_must_change(self) -> None:
+        self.auth_mod.create_user("admin0", "senha1234", role=self.auth_mod.ROLE_ADMIN)
+        user = self.auth_mod.create_user("target", "OldPass1!", must_change_password=False)
+        self.auth_mod.reset_user_password(user.id, "TempPass1!")
+        updated = self.auth_mod.get_user(user.id)
+        self.assertIsNotNone(updated)
+        self.assertTrue(updated.must_change_password)
+
+    def test_update_role_and_list_users(self) -> None:
+        u = self.auth_mod.create_user("eq1", "senha1234", role=self.auth_mod.ROLE_EQUIPE)
+        self.auth_mod.update_user_role(u.id, self.auth_mod.ROLE_ADMIN)
+        listing = self.auth_mod.list_users()
+        match = next((item for item in listing if item["username"] == "eq1"), None)
+        self.assertIsNotNone(match)
+        self.assertEqual(match["role"], self.auth_mod.ROLE_ADMIN)
+
+    def test_sidebar_labels_for_cliente_excludes_advanced(self) -> None:
+        labels = self.ui_mod.sidebar_labels_for_role(self.auth_mod.ROLE_CLIENTE)
+        self.assertIn("Nova campanha", labels)
+        self.assertNotIn("Aquecer números", labels)
+        self.assertNotIn("Gerenciar usuários", labels)
+
+    def test_sidebar_labels_for_equipe_includes_warmup(self) -> None:
+        labels = self.ui_mod.sidebar_labels_for_role(self.auth_mod.ROLE_EQUIPE)
+        self.assertIn("Nova campanha", labels)
+        self.assertIn("Aquecer números", labels)
+        self.assertNotIn("Gerenciar usuários", labels)
+
+    def test_sidebar_labels_for_admin_includes_all(self) -> None:
+        labels = self.ui_mod.sidebar_labels_for_role(self.auth_mod.ROLE_ADMIN)
+        self.assertIn("Nova campanha", labels)
+        self.assertIn("Aquecer números", labels)
+        self.assertIn("Gerenciar usuários", labels)
+
+    def test_settings_flags_cliente_hides_advanced(self) -> None:
+        flags = self.settings_mod.settings_flags_for_role(self.auth_mod.ROLE_CLIENTE)
+        self.assertFalse(flags["advanced"])
+        self.assertFalse(flags["technical"])
+
+    def test_settings_flags_equipe_shows_advanced(self) -> None:
+        flags = self.settings_mod.settings_flags_for_role(self.auth_mod.ROLE_EQUIPE)
+        self.assertTrue(flags["advanced"])
+        self.assertTrue(flags["technical"])
+
+    def test_settings_flags_admin_shows_advanced(self) -> None:
+        flags = self.settings_mod.settings_flags_for_role(self.auth_mod.ROLE_ADMIN)
+        self.assertTrue(flags["advanced"])
+        self.assertTrue(flags["technical"])
 
 
 if __name__ == "__main__":
