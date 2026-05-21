@@ -49,7 +49,7 @@ def _delay_preset_for_values(minimum: object, maximum: object) -> str:
 
 def settings_flags_for_role(role: str) -> dict[str, bool]:
     normalized = str(role or "").strip().lower()
-    can_advanced = normalized in (auth.ROLE_EQUIPE, auth.ROLE_ADMIN)
+    can_advanced = normalized == auth.ROLE_EQUIPE or auth.is_client_admin_role(normalized)
     return {
         "advanced": can_advanced,
         "technical": can_advanced,
@@ -675,8 +675,7 @@ class SettingsScreenMixin:
         self._entry(panel, "Código de confirmação", typed_code).pack(fill="x", pady=(0, 14))
 
         def confirm() -> None:
-            user = auth.authenticate(self.current_user.username, password.get())
-            if not user:
+            if not auth.verify_user_password(self.current_user.id, password.get()):
                 messagebox.showerror(APP_TITLE, "Senha não confere.", parent=dialog)
                 return
             if typed_code.get().strip() != code:
