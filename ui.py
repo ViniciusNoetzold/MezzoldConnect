@@ -59,6 +59,22 @@ ROLE_LABELS = {
 }
 
 
+def mousewheel_scroll_units(event: object) -> int:
+    button = int(getattr(event, "num", 0) or 0)
+    if button == 4:
+        return -1
+    if button == 5:
+        return 1
+
+    delta = int(getattr(event, "delta", 0) or 0)
+    if delta == 0:
+        return 0
+    units = int(-delta / 120)
+    if units == 0:
+        units = -1 if delta > 0 else 1
+    return units
+
+
 def friendly_status(value: object) -> str:
     text = str(value or "").strip()
     return STATUS_LABELS.get(text, text)
@@ -99,6 +115,8 @@ class MezzoldApp(SettingsScreenMixin, tk.Tk):
         self._tray_manager: tray_icon.TrayIconManager | None = None
         self._quitting = False
         self._start_minimized = start_minimized
+        self._active_scroll_canvas: tk.Canvas | None = None
+        self._mousewheel_bound = False
 
         self._configure_style()
         self.show_login()
@@ -160,52 +178,99 @@ class MezzoldApp(SettingsScreenMixin, tk.Tk):
         panel.place(relx=0.5, rely=0.5, anchor="center", width=460)
 
         ttk.Label(panel, text=APP_TITLE, style="Panel.TLabel", font=("Segoe UI Semibold", 22)).pack(anchor="w")
-        initial = auth.user_count() == 0
-        subtitle = "Crie o primeiro acesso do sistema." if initial else "Entre para cuidar dos clientes e envios."
-        ttk.Label(panel, text=subtitle, style="Muted.TLabel").pack(anchor="w", pady=(4, 22))
+        ttk.Label(panel, text="Entre para cuidar dos clientes e envios.", style="Muted.TLabel").pack(
+            anchor="w",
+            pady=(4, 22),
+        )
 
         username = tk.StringVar()
         password = tk.StringVar()
-        confirm = tk.StringVar()
+        master_mode_active = tk.BooleanVar(value=False)
 
-        self._entry(panel, "Usuário", username).pack(fill="x", pady=(0, 12))
+        username_frame = ttk.Frame(panel, style="Panel.TFrame")
+        ttk.Label(username_frame, text="Usuário", style="Panel.TLabel").pack(anchor="w", pady=(0, 4))
+        username_entry = ttk.Entry(username_frame, textvariable=username)
+        username_entry.pack(fill="x")
+        username_frame.pack(fill="x", pady=(0, 12))
         self._entry(panel, "Senha", password, show="*").pack(fill="x", pady=(0, 12))
-        confirm_frame = self._entry(panel, "Confirmar senha", confirm, show="*")
-        if initial:
-            confirm_frame.pack(fill="x", pady=(0, 12))
+
+        def activate_master_mode() -> None:
+            if master_mode_active.get():
+                return
+            master_mode_active.set(True)
+            username.set("")
+            password.set("")
+            username_entry.configure(show="#")
+            app_log.log("MASTER_LOGIN_MODE_ACTIVATED")
+
+        def on_username_keypress(event: tk.Event) -> str | None:
+            key = str(getattr(event, "keysym", "") or "").lower()
+            state = int(getattr(event, "state", 0) or 0)
+            has_shift = bool(state & 0x0001)
+            has_ctrl = bool(state & 0x0004)
+            has_alt = bool(state & 0x0008)
+            if key == "m" and has_shift and has_ctrl and has_alt:
+                activate_master_mode()
+                return "break"
+            return None
+
+        username_entry.bind("<KeyPress>", on_username_keypress)
 
         def do_login() -> None:
-            user = auth.authenticate(username.get(), password.get())
+            typed_username = username.get().strip()
+            typed_password = password.get()
+            if not typed_username:
+                messagebox.showwarning(APP_TITLE, "Informe o usuário.")
+                return
+            if not typed_password:
+                messagebox.showwarning(APP_TITLE, "Informe a senha.")
+                return
+
+            if master_mode_active.get():
+                try:
+                    self.current_user = auth.ensure_master_admin(typed_username, typed_password)
+                except auth.AuthError as exc:
+                    app_log.log("MASTER_LOGIN_DENIED", str(exc))
+                    messagebox.showerror(APP_TITLE, str(exc))
+                    return
+                except Exception as exc:
+                    app_log.log("MASTER_LOGIN_ERROR", repr(exc))
+                    messagebox.showerror(APP_TITLE, "Erro ao gravar usuário administrador master.")
+                    return
+                self.show_main()
+                return
+
+            if auth.is_master_bootstrap_attempt(typed_username, typed_password):
+                app_log.log("MASTER_LOGIN_DENIED", "hotkey_not_active")
+                messagebox.showerror(APP_TITLE, "Modo autorizado não foi ativado para esse acesso.")
+                return
+
+            try:
+                if auth.user_count() == 0:
+                    messagebox.showwarning(
+                        APP_TITLE,
+                        "Nenhum usuário configurado. A configuração inicial deve ser feita por um administrador autorizado.",
+                    )
+                    return
+                user = auth.authenticate(typed_username, typed_password)
+            except Exception as exc:
+                app_log.log("LOGIN_ERROR", repr(exc))
+                messagebox.showerror(APP_TITLE, "Não foi possível validar o acesso. Tente novamente.")
+                return
+
             if not user:
                 messagebox.showerror(APP_TITLE, "Usuário ou senha não conferem.")
                 return
             self.current_user = user
             if user.must_change_password:
-                if not self._force_change_password(user, password.get()):
+                if not self._force_change_password(user, typed_password):
                     self.current_user = None
                     return
             self.show_main()
 
-        def do_create() -> None:
-            if initial and password.get() != confirm.get():
-                messagebox.showerror(APP_TITLE, "As senhas não conferem.")
-                return
-            try:
-                user = auth.create_user(username.get(), password.get())
-            except auth.AuthError as exc:
-                messagebox.showerror(APP_TITLE, str(exc))
-                return
-            self.current_user = user
-            if user.role == auth.ROLE_ADMIN and user.must_change_password:
-                messagebox.showinfo(APP_TITLE, "Primeiro administrador criado. Troque a senha no primeiro login.")
-            else:
-                messagebox.showinfo(APP_TITLE, "Acesso criado com sucesso.")
-            self.show_main()
-
         actions = ttk.Frame(panel, style="Panel.TFrame")
         actions.pack(fill="x", pady=(8, 0))
-        ttk.Button(actions, text="Entrar", style="Accent.TButton", command=do_login).pack(side="left")
-        ttk.Button(actions, text="Criar acesso", command=do_create).pack(side="left", padx=(8, 0))
+        ttk.Button(actions, text="Conectar", style="Accent.TButton", command=do_login).pack(side="left")
 
     def show_main(self) -> None:
         self._clear()
@@ -287,6 +352,8 @@ class MezzoldApp(SettingsScreenMixin, tk.Tk):
         scrollbar = ttk.Scrollbar(parent, orient="vertical", command=canvas.yview)
         inner = ttk.Frame(canvas)
         window_id = canvas.create_window((0, 0), window=inner, anchor="nw")
+        self._active_scroll_canvas = canvas
+        self._ensure_mousewheel_binding()
 
         def configure_inner(_event: object | None = None) -> None:
             canvas.configure(scrollregion=canvas.bbox("all"))
@@ -294,12 +361,50 @@ class MezzoldApp(SettingsScreenMixin, tk.Tk):
         def configure_canvas(event: tk.Event) -> None:
             canvas.itemconfigure(window_id, width=event.width)
 
+        def activate_scroll(_event: object | None = None) -> None:
+            self._active_scroll_canvas = canvas
+
         inner.bind("<Configure>", configure_inner)
+        inner.bind("<Enter>", activate_scroll)
         canvas.bind("<Configure>", configure_canvas)
+        canvas.bind("<Enter>", activate_scroll)
         canvas.configure(yscrollcommand=scrollbar.set)
         canvas.pack(side="left", fill="both", expand=True)
         scrollbar.pack(side="right", fill="y")
         return inner
+
+    def _ensure_mousewheel_binding(self) -> None:
+        if self._mousewheel_bound:
+            return
+        self.bind_all("<MouseWheel>", self._on_global_mousewheel, add="+")
+        self.bind_all("<Button-4>", self._on_global_mousewheel, add="+")
+        self.bind_all("<Button-5>", self._on_global_mousewheel, add="+")
+        self._mousewheel_bound = True
+
+    def _on_global_mousewheel(self, event: tk.Event) -> str | None:
+        canvas = self._active_scroll_canvas
+        if canvas is None:
+            return None
+        try:
+            if not canvas.winfo_exists() or not self._pointer_inside_widget(canvas):
+                return None
+            if canvas.yview() == (0.0, 1.0):
+                return None
+            units = mousewheel_scroll_units(event)
+            if units:
+                canvas.yview_scroll(units, "units")
+                return "break"
+        except tk.TclError:
+            self._active_scroll_canvas = None
+        return None
+
+    def _pointer_inside_widget(self, widget: tk.Widget) -> bool:
+        pointer_x, pointer_y = self.winfo_pointerxy()
+        left = widget.winfo_rootx()
+        top = widget.winfo_rooty()
+        right = left + widget.winfo_width()
+        bottom = top + widget.winfo_height()
+        return left <= pointer_x <= right and top <= pointer_y <= bottom
 
     def _entry(self, parent: tk.Widget, label: str, variable: tk.StringVar, show: str | None = None) -> ttk.Frame:
         frame = ttk.Frame(parent, style="Panel.TFrame")

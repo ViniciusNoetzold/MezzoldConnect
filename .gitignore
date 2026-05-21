@@ -8,6 +8,7 @@ logs/
 node_modules/
 coverage/
 *.spec
+!Mezzold Connect.spec
 installer/staging/
 installer/*.sed
 
