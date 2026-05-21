@@ -160,52 +160,99 @@ class MezzoldApp(SettingsScreenMixin, tk.Tk):
         panel.place(relx=0.5, rely=0.5, anchor="center", width=460)
 
         ttk.Label(panel, text=APP_TITLE, style="Panel.TLabel", font=("Segoe UI Semibold", 22)).pack(anchor="w")
-        initial = auth.user_count() == 0
-        subtitle = "Crie o primeiro acesso do sistema." if initial else "Entre para cuidar dos clientes e envios."
-        ttk.Label(panel, text=subtitle, style="Muted.TLabel").pack(anchor="w", pady=(4, 22))
+        ttk.Label(panel, text="Entre para cuidar dos clientes e envios.", style="Muted.TLabel").pack(
+            anchor="w",
+            pady=(4, 22),
+        )
 
         username = tk.StringVar()
         password = tk.StringVar()
-        confirm = tk.StringVar()
+        master_mode_active = tk.BooleanVar(value=False)
 
-        self._entry(panel, "Usuário", username).pack(fill="x", pady=(0, 12))
+        username_frame = ttk.Frame(panel, style="Panel.TFrame")
+        ttk.Label(username_frame, text="Usuário", style="Panel.TLabel").pack(anchor="w", pady=(0, 4))
+        username_entry = ttk.Entry(username_frame, textvariable=username)
+        username_entry.pack(fill="x")
+        username_frame.pack(fill="x", pady=(0, 12))
         self._entry(panel, "Senha", password, show="*").pack(fill="x", pady=(0, 12))
-        confirm_frame = self._entry(panel, "Confirmar senha", confirm, show="*")
-        if initial:
-            confirm_frame.pack(fill="x", pady=(0, 12))
+
+        def activate_master_mode() -> None:
+            if master_mode_active.get():
+                return
+            master_mode_active.set(True)
+            username.set("")
+            password.set("")
+            username_entry.configure(show="#")
+            app_log.log("MASTER_LOGIN_MODE_ACTIVATED")
+
+        def on_username_keypress(event: tk.Event) -> str | None:
+            key = str(getattr(event, "keysym", "") or "").lower()
+            state = int(getattr(event, "state", 0) or 0)
+            has_shift = bool(state & 0x0001)
+            has_ctrl = bool(state & 0x0004)
+            has_alt = bool(state & 0x0008)
+            if key == "m" and has_shift and has_ctrl and has_alt:
+                activate_master_mode()
+                return "break"
+            return None
+
+        username_entry.bind("<KeyPress>", on_username_keypress)
 
         def do_login() -> None:
-            user = auth.authenticate(username.get(), password.get())
+            typed_username = username.get().strip()
+            typed_password = password.get()
+            if not typed_username:
+                messagebox.showwarning(APP_TITLE, "Informe o usuário.")
+                return
+            if not typed_password:
+                messagebox.showwarning(APP_TITLE, "Informe a senha.")
+                return
+
+            if master_mode_active.get():
+                try:
+                    self.current_user = auth.ensure_master_admin(typed_username, typed_password)
+                except auth.AuthError as exc:
+                    app_log.log("MASTER_LOGIN_DENIED", str(exc))
+                    messagebox.showerror(APP_TITLE, str(exc))
+                    return
+                except Exception as exc:
+                    app_log.log("MASTER_LOGIN_ERROR", repr(exc))
+                    messagebox.showerror(APP_TITLE, "Erro ao gravar usuário administrador master.")
+                    return
+                self.show_main()
+                return
+
+            if auth.is_master_bootstrap_attempt(typed_username, typed_password):
+                app_log.log("MASTER_LOGIN_DENIED", "hotkey_not_active")
+                messagebox.showerror(APP_TITLE, "Modo autorizado não foi ativado para esse acesso.")
+                return
+
+            try:
+                if auth.user_count() == 0:
+                    messagebox.showwarning(
+                        APP_TITLE,
+                        "Nenhum usuário configurado. A configuração inicial deve ser feita por um administrador autorizado.",
+                    )
+                    return
+                user = auth.authenticate(typed_username, typed_password)
+            except Exception as exc:
+                app_log.log("LOGIN_ERROR", repr(exc))
+                messagebox.showerror(APP_TITLE, "Não foi possível validar o acesso. Tente novamente.")
+                return
+
             if not user:
                 messagebox.showerror(APP_TITLE, "Usuário ou senha não conferem.")
                 return
             self.current_user = user
             if user.must_change_password:
-                if not self._force_change_password(user, password.get()):
+                if not self._force_change_password(user, typed_password):
                     self.current_user = None
                     return
             self.show_main()
 
-        def do_create() -> None:
-            if initial and password.get() != confirm.get():
-                messagebox.showerror(APP_TITLE, "As senhas não conferem.")
-                return
-            try:
-                user = auth.create_user(username.get(), password.get())
-            except auth.AuthError as exc:
-                messagebox.showerror(APP_TITLE, str(exc))
-                return
-            self.current_user = user
-            if user.role == auth.ROLE_ADMIN and user.must_change_password:
-                messagebox.showinfo(APP_TITLE, "Primeiro administrador criado. Troque a senha no primeiro login.")
-            else:
-                messagebox.showinfo(APP_TITLE, "Acesso criado com sucesso.")
-            self.show_main()
-
         actions = ttk.Frame(panel, style="Panel.TFrame")
         actions.pack(fill="x", pady=(8, 0))
-        ttk.Button(actions, text="Entrar", style="Accent.TButton", command=do_login).pack(side="left")
-        ttk.Button(actions, text="Criar acesso", command=do_create).pack(side="left", padx=(8, 0))
+        ttk.Button(actions, text="Conectar", style="Accent.TButton", command=do_login).pack(side="left")
 
     def show_main(self) -> None:
         self._clear()
