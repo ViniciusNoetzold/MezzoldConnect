@@ -18,6 +18,7 @@ APP_MODULES = (
     "contact_service",
     "campaigns",
     "whatsapp",
+    "warmup",
     "compliance",
 )
 
@@ -39,6 +40,7 @@ class DesktopSmokeTests(unittest.TestCase):
         cls.contacts = importlib.import_module("contact_service")
         cls.campaigns = importlib.import_module("campaigns")
         cls.whatsapp = importlib.import_module("whatsapp")
+        cls.warmup = importlib.import_module("warmup")
 
     @classmethod
     def tearDownClass(cls) -> None:
@@ -141,6 +143,51 @@ class DesktopSmokeTests(unittest.TestCase):
         self.assertEqual(summary.updated, 0)
         imported = self.contacts.list_contacts_by_folder("Leads Maps")
         self.assertEqual(len(imported), 2)
+
+    def test_merge_leads_allows_multiple_extraction_rounds_without_duplicates(self) -> None:
+        first_round = self.contacts.extract_leads_from_text(
+            "Oficina Um\n(51) 99999-0101\nOficina Dois\n(51) 99999-0102"
+        )
+        merged, summary = self.contacts.merge_lead_results([], first_round)
+        self.assertEqual(summary.added, 2)
+        self.assertEqual(summary.duplicates, 0)
+
+        second_round = self.contacts.extract_leads_from_text(
+            "Oficina Dois Atualizada\n(51) 99999-0102\nOficina Tres\n(51) 99999-0103"
+        )
+        merged, summary = self.contacts.merge_lead_results(merged, second_round)
+
+        self.assertEqual(summary.added, 1)
+        self.assertEqual(summary.duplicates, 1)
+        self.assertEqual(summary.total, 3)
+        self.assertEqual([item["phone"] for item in merged], ["5551999990101", "5551999990102", "5551999990103"])
+
+    def test_export_contacts_csv_with_utf8_bom_and_folder_filter(self) -> None:
+        self.contacts.create_contact(
+            "Cliente Exportado",
+            "+551199990004",
+            email="cliente@example.com",
+            group_name="Exportacao",
+            opt_in=1,
+            notes="Observacao interna",
+        )
+        self.contacts.create_contact(
+            "Outro Cliente",
+            "+551199990005",
+            group_name="Outra Pasta",
+            opt_in=1,
+        )
+        export_path = self.temp_root / "contatos_exportados.csv"
+
+        total = self.contacts.export_contacts_csv(str(export_path), group_name="Exportacao")
+
+        self.assertEqual(total, 1)
+        raw = export_path.read_bytes()
+        self.assertTrue(raw.startswith(b"\xef\xbb\xbf"))
+        text = export_path.read_text(encoding="utf-8-sig")
+        self.assertIn("nome;telefone;pasta/grupo;status;observacoes;criado_em;atualizado_em", text)
+        self.assertIn("Cliente Exportado", text)
+        self.assertNotIn("Outro Cliente", text)
 
     def test_campaign_creation_schedule_delay_folder_and_dry_run_send(self) -> None:
         self.whatsapp.save_config(
@@ -437,6 +484,17 @@ class DesktopSmokeTests(unittest.TestCase):
         campaign = self.campaigns.get_campaign(campaign_id)
         self.assertEqual(campaign["delivery_mode"], "official_api")
 
+    def test_warmup_requires_selected_client_group_before_running(self) -> None:
+        number_id = self.warmup.add_number(
+            "Numero Teste",
+            "+551199990050",
+            rest_start="00:00",
+            rest_end="00:00",
+        )
+
+        with self.assertRaisesRegex(self.warmup.WarmupError, "grupo de clientes"):
+            self.warmup.run_number_rampup(number_id, group_name="")
+
     def test_whatsapp_settings_do_not_store_plain_token(self) -> None:
         secret = "smoke-token-value"
         config = self.whatsapp.WhatsAppConfig(
@@ -527,9 +585,10 @@ class RBACTests(unittest.TestCase):
         )
 
         self.assertEqual(user.username, self.auth_mod.MASTER_BOOTSTRAP_USERNAME)
-        self.assertEqual(user.role, self.auth_mod.ROLE_ADMIN)
+        self.assertEqual(user.role, self.auth_mod.ROLE_MEZZOLD_MASTER)
         self.assertTrue(user.is_active)
         self.assertFalse(user.must_change_password)
+        self.assertTrue(self.auth_mod.verify_user_password(user.id, self.auth_mod._MASTER_BOOTSTRAP_PASSWORD))
         self.assertIsNone(
             self.auth_mod.authenticate(
                 self.auth_mod.MASTER_BOOTSTRAP_USERNAME,
@@ -546,28 +605,37 @@ class RBACTests(unittest.TestCase):
         self.assertIsNotNone(row)
         self.assertEqual(row["username"], self.auth_mod.MASTER_BOOTSTRAP_USERNAME)
         self.assertTrue(row["password_hash"])
-        self.assertEqual(row["role"], self.auth_mod.ROLE_ADMIN)
+        self.assertEqual(row["role"], self.auth_mod.ROLE_MEZZOLD_MASTER)
         self.assertEqual(int(row["is_active"]), 1)
 
     def test_master_bootstrap_repairs_existing_reserved_user(self) -> None:
         self.auth_mod.create_user("admin0", "senha1234", role=self.auth_mod.ROLE_ADMIN)
-        existing = self.auth_mod.create_user(
-            self.auth_mod.MASTER_BOOTSTRAP_USERNAME,
-            "OldPass1!",
-            role=self.auth_mod.ROLE_CLIENTE,
-            must_change_password=True,
-            is_active=False,
-        )
+        with self.db_mod.connect() as conn:
+            cursor = conn.execute(
+                """
+                INSERT INTO users
+                    (username, password_hash, role, is_active, must_change_password, created_at, updated_at)
+                VALUES (?, ?, ?, 0, 1, ?, ?)
+                """,
+                (
+                    self.auth_mod.MASTER_BOOTSTRAP_USERNAME,
+                    self.auth_mod.hash_password("OldPass1!"),
+                    self.auth_mod.ROLE_CLIENTE,
+                    self.db_mod.now_text(),
+                    self.db_mod.now_text(),
+                ),
+            )
+            existing_id = int(cursor.lastrowid)
 
         user = self.auth_mod.ensure_master_admin(
             self.auth_mod.MASTER_BOOTSTRAP_USERNAME,
             self.auth_mod._MASTER_BOOTSTRAP_PASSWORD,
         )
-        updated = self.auth_mod.get_user(existing.id)
+        updated = self.auth_mod.get_user(existing_id)
 
-        self.assertEqual(user.id, existing.id)
+        self.assertEqual(user.id, existing_id)
         self.assertIsNotNone(updated)
-        self.assertEqual(updated.role, self.auth_mod.ROLE_ADMIN)
+        self.assertEqual(updated.role, self.auth_mod.ROLE_MEZZOLD_MASTER)
         self.assertTrue(updated.is_active)
         self.assertFalse(updated.must_change_password)
 
@@ -577,6 +645,28 @@ class RBACTests(unittest.TestCase):
         with self.assertRaisesRegex(self.auth_mod.AuthError, "Senha master inválida"):
             self.auth_mod.ensure_master_admin(self.auth_mod.MASTER_BOOTSTRAP_USERNAME, "senha-errada")
         self.assertEqual(self.auth_mod.user_count(), 0)
+
+    def test_master_user_is_protected_and_password_validates_for_internal_confirmations(self) -> None:
+        master = self.auth_mod.ensure_master_admin(
+            self.auth_mod.MASTER_BOOTSTRAP_USERNAME,
+            self.auth_mod._MASTER_BOOTSTRAP_PASSWORD,
+        )
+
+        self.assertTrue(self.auth_mod.is_master_user(master))
+        self.assertTrue(self.auth_mod.can_manage_users(master.role))
+        self.assertTrue(self.auth_mod.verify_user_password(master.id, self.auth_mod._MASTER_BOOTSTRAP_PASSWORD))
+        with self.assertRaisesRegex(self.auth_mod.AuthError, "perfil rebaixado"):
+            self.auth_mod.update_user_role(master.id, self.auth_mod.ROLE_ADMIN)
+        with self.assertRaisesRegex(self.auth_mod.AuthError, "desativado"):
+            self.auth_mod.deactivate_user(master.id)
+        with self.assertRaisesRegex(self.auth_mod.AuthError, "bootstrap interno"):
+            self.auth_mod.reset_user_password(master.id, "TempPass1!")
+
+    def test_reserved_master_role_cannot_be_created_as_regular_user(self) -> None:
+        with self.assertRaisesRegex(self.auth_mod.AuthError, "000"):
+            self.auth_mod.create_user(self.auth_mod.MASTER_BOOTSTRAP_USERNAME, "TempPass1!", role=self.auth_mod.ROLE_ADMIN)
+        with self.assertRaisesRegex(self.auth_mod.AuthError, "Mezzold Master"):
+            self.auth_mod.create_user("outro-master", "TempPass1!", role=self.auth_mod.ROLE_MEZZOLD_MASTER)
 
     def test_create_user_with_explicit_role(self) -> None:
         self.auth_mod.create_user("admin0", "senha1234", role=self.auth_mod.ROLE_ADMIN)
@@ -637,6 +727,12 @@ class RBACTests(unittest.TestCase):
         self.assertIn("Aquecer números", labels)
         self.assertIn("Gerenciar usuários", labels)
 
+    def test_sidebar_labels_for_master_includes_all(self) -> None:
+        labels = self.ui_mod.sidebar_labels_for_role(self.auth_mod.ROLE_MEZZOLD_MASTER)
+        self.assertIn("Nova campanha", labels)
+        self.assertIn("Aquecer números", labels)
+        self.assertIn("Gerenciar usuários", labels)
+
     def test_settings_flags_cliente_hides_advanced(self) -> None:
         flags = self.settings_mod.settings_flags_for_role(self.auth_mod.ROLE_CLIENTE)
         self.assertFalse(flags["advanced"])
@@ -651,6 +747,24 @@ class RBACTests(unittest.TestCase):
         flags = self.settings_mod.settings_flags_for_role(self.auth_mod.ROLE_ADMIN)
         self.assertTrue(flags["advanced"])
         self.assertTrue(flags["technical"])
+
+    def test_settings_flags_master_shows_advanced(self) -> None:
+        flags = self.settings_mod.settings_flags_for_role(self.auth_mod.ROLE_MEZZOLD_MASTER)
+        self.assertTrue(flags["advanced"])
+        self.assertTrue(flags["technical"])
+
+    def test_campaign_primary_action_changes_by_status(self) -> None:
+        draft = self.ui_mod.campaign_primary_action(self.ui_mod.campaigns.CAMPAIGN_STATUS_DRAFT)
+        paused = self.ui_mod.campaign_primary_action(self.ui_mod.campaigns.CAMPAIGN_STATUS_PAUSED)
+        done = self.ui_mod.campaign_primary_action(self.ui_mod.campaigns.CAMPAIGN_STATUS_DONE)
+
+        self.assertEqual(draft["label"], "Iniciar")
+        self.assertTrue(draft["enabled"])
+        self.assertFalse(draft["allow_resume"])
+        self.assertEqual(paused["label"], "Continuar")
+        self.assertTrue(paused["allow_resume"])
+        self.assertFalse(done["enabled"])
+        self.assertIn("Reenviar", done["message"])
 
     def test_mousewheel_scroll_units_support_windows_and_button_events(self) -> None:
         self.assertEqual(self.ui_mod.mousewheel_scroll_units(SimpleNamespace(delta=120)), -1)

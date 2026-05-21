@@ -16,9 +16,28 @@ SALT_BYTES = 16
 ROLE_CLIENTE = "cliente"
 ROLE_EQUIPE = "equipe"
 ROLE_ADMIN = "admin"
-VALID_ROLES = (ROLE_CLIENTE, ROLE_EQUIPE, ROLE_ADMIN)
+ROLE_MEZZOLD_MASTER = "mezzold_master"
+VALID_ROLES = (ROLE_CLIENTE, ROLE_EQUIPE, ROLE_ADMIN, ROLE_MEZZOLD_MASTER)
 MASTER_BOOTSTRAP_USERNAME = "000"
 _MASTER_BOOTSTRAP_PASSWORD = ""
+ROLE_ALIASES = {
+    "": ROLE_CLIENTE,
+    "user": ROLE_CLIENTE,
+    "usuario": ROLE_CLIENTE,
+    "usuário": ROLE_CLIENTE,
+    "client": ROLE_CLIENTE,
+    "operator": ROLE_CLIENTE,
+    "operador": ROLE_CLIENTE,
+    "client_admin": ROLE_ADMIN,
+    "cliente_admin": ROLE_ADMIN,
+    "administrador_cliente": ROLE_ADMIN,
+    "administrator": ROLE_ADMIN,
+    "administrador": ROLE_ADMIN,
+    "master": ROLE_MEZZOLD_MASTER,
+    "mezzold master": ROLE_MEZZOLD_MASTER,
+}
+
+
 class AuthError(ValueError):
     pass
 
@@ -34,9 +53,34 @@ class User:
 
 def _normalize_role(role: str | None) -> str:
     value = str(role or "").strip().lower()
+    value = ROLE_ALIASES.get(value, value)
     if value not in VALID_ROLES:
         return ROLE_CLIENTE
     return value
+
+
+def is_master_role(role: str | None) -> bool:
+    return _normalize_role(role) == ROLE_MEZZOLD_MASTER
+
+
+def is_client_admin_role(role: str | None) -> bool:
+    return _normalize_role(role) in {ROLE_ADMIN, ROLE_MEZZOLD_MASTER}
+
+
+def is_master_user(user: User | None) -> bool:
+    return bool(
+        user
+        and is_master_bootstrap_username(user.username)
+        and is_master_role(user.role)
+    )
+
+
+def can_manage_users(role: str | None) -> bool:
+    return is_client_admin_role(role)
+
+
+def can_manage_master(role: str | None) -> bool:
+    return is_master_role(role)
 
 
 def _b64(data: bytes) -> str:
@@ -132,8 +176,12 @@ def create_user(
         raise AuthError("A senha precisa ter pelo menos 8 caracteres.")
 
     final_role = _normalize_role(role)
+    if is_master_bootstrap_username(username) and final_role != ROLE_MEZZOLD_MASTER:
+        raise AuthError("O usuario 000 e reservado ao Mezzold Master.")
+    if final_role == ROLE_MEZZOLD_MASTER and not is_master_bootstrap_username(username):
+        raise AuthError("O perfil Mezzold Master e reservado ao usuario 000.")
     final_must_change = bool(must_change_password)
-    if user_count() == 0 and role == ROLE_CLIENTE and not must_change_password:
+    if user_count() == 0 and final_role == ROLE_CLIENTE and not must_change_password:
         final_role = ROLE_ADMIN
         final_must_change = True
 
@@ -198,7 +246,7 @@ def ensure_master_admin(username: str, password: str) -> User:
                         updated_at = ?
                     WHERE id = ?
                     """,
-                    (password_hash, ROLE_ADMIN, timestamp, timestamp, user_id),
+                    (password_hash, ROLE_MEZZOLD_MASTER, timestamp, timestamp, user_id),
                 )
             else:
                 cursor = conn.execute(
@@ -207,14 +255,14 @@ def ensure_master_admin(username: str, password: str) -> User:
                         (username, password_hash, role, is_active, must_change_password, created_at, updated_at, last_login_at)
                     VALUES (?, ?, ?, 1, 0, ?, ?, ?)
                     """,
-                    (MASTER_BOOTSTRAP_USERNAME, password_hash, ROLE_ADMIN, timestamp, timestamp, timestamp),
+                    (MASTER_BOOTSTRAP_USERNAME, password_hash, ROLE_MEZZOLD_MASTER, timestamp, timestamp, timestamp),
                 )
                 user_id = int(cursor.lastrowid)
     except sqlite3.Error as exc:
         raise AuthError("Erro ao gravar usuário administrador master.") from exc
 
     user = get_user(user_id)
-    if not user or user.role != ROLE_ADMIN or not user.is_active:
+    if not user or user.role != ROLE_MEZZOLD_MASTER or not user.is_active:
         raise AuthError("Erro ao gravar usuário administrador master.")
     return user
 
@@ -255,6 +303,18 @@ def authenticate(username: str, password: str) -> User | None:
     )
 
 
+def verify_user_password(user_id: int, password: str) -> bool:
+    with connect() as conn:
+        row = conn.execute(
+            "SELECT password_hash FROM users WHERE id = ? AND is_active = 1",
+            (int(user_id),),
+        ).fetchone()
+    data = row_to_dict(row)
+    if not data:
+        return False
+    return verify_password(password, str(data["password_hash"]))
+
+
 def change_password(user_id: int, current_password: str, new_password: str) -> None:
     if len(new_password) < 8:
         raise AuthError("A nova senha precisa ter pelo menos 8 caracteres.")
@@ -276,6 +336,9 @@ def reset_user_password(user_id: int, new_password: str, must_change_password: b
     if len(new_password) < 8:
         raise AuthError("A nova senha precisa ter pelo menos 8 caracteres.")
     with connect() as conn:
+        row = conn.execute("SELECT username FROM users WHERE id = ?", (int(user_id),)).fetchone()
+        if row and is_master_bootstrap_username(str(row["username"])):
+            raise AuthError("A senha do Mezzold Master e gerenciada pelo bootstrap interno.")
         conn.execute(
             "UPDATE users SET password_hash = ?, must_change_password = ?, updated_at = ? WHERE id = ?",
             (hash_password(new_password), 1 if must_change_password else 0, now_text(), int(user_id)),
@@ -293,6 +356,9 @@ def set_must_change_password(user_id: int, required: bool) -> None:
 def update_user_role(user_id: int, role: str) -> None:
     normalized = _normalize_role(role)
     with connect() as conn:
+        row = conn.execute("SELECT username FROM users WHERE id = ?", (int(user_id),)).fetchone()
+        if row and is_master_bootstrap_username(str(row["username"])) and normalized != ROLE_MEZZOLD_MASTER:
+            raise AuthError("O Mezzold Master nao pode ter o perfil rebaixado.")
         conn.execute(
             "UPDATE users SET role = ?, updated_at = ? WHERE id = ?",
             (normalized, now_text(), int(user_id)),
@@ -301,6 +367,9 @@ def update_user_role(user_id: int, role: str) -> None:
 
 def deactivate_user(user_id: int) -> None:
     with connect() as conn:
+        row = conn.execute("SELECT username FROM users WHERE id = ?", (int(user_id),)).fetchone()
+        if row and is_master_bootstrap_username(str(row["username"])):
+            raise AuthError("O Mezzold Master nao pode ser desativado.")
         conn.execute(
             "UPDATE users SET is_active = 0, updated_at = ? WHERE id = ?",
             (now_text(), int(user_id)),

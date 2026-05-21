@@ -236,6 +236,9 @@ def run_number_rampup(
     progress_callback: ProgressCallback | None = None,
     stop_event: Event | None = None,
 ) -> dict[str, int]:
+    group_name = group_name.strip()
+    if not group_name:
+        raise WarmupError("Escolha um grupo de clientes para testar.")
     number = get_number(number_id)
     if not number:
         raise WarmupError("Não encontrei esse número.")

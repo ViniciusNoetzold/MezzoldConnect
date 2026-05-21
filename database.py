@@ -10,7 +10,7 @@ from typing import Any, Iterable
 
 
 APP_TITLE = "Mezzold Connect"
-APP_VERSION = "1.0.3"
+APP_VERSION = "1.0.4"
 APP_DOWNLOAD_URL = "https://github.com/ViniciusNoetzold/MezzoldConnect/releases"
 DEFAULT_CONTACT_FOLDER = "Importados"
 
@@ -293,7 +293,11 @@ def initialize_database() -> None:
                     ELSE updated_at
                 END,
                 role = CASE
+                    WHEN username = '000' THEN 'mezzold_master'
                     WHEN COALESCE(TRIM(role), '') IN ('', 'user') THEN 'cliente'
+                    WHEN COALESCE(TRIM(role), '') IN ('operator', 'operador') THEN 'cliente'
+                    WHEN COALESCE(TRIM(role), '') IN ('equipe', 'client_admin', 'cliente_admin', 'administrador_cliente') THEN 'admin'
+                    WHEN COALESCE(TRIM(role), '') IN ('master', 'mezzold master') THEN 'mezzold_master'
                     ELSE role
                 END
             """
