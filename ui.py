@@ -53,9 +53,10 @@ STATUS_LABELS = {
 }
 
 ROLE_LABELS = {
-    auth.ROLE_CLIENTE: "Cliente",
-    auth.ROLE_EQUIPE: "Equipe",
-    auth.ROLE_ADMIN: "Administrador",
+    auth.ROLE_CLIENTE: "Operador",
+    auth.ROLE_EQUIPE: "Administrador do Cliente",
+    auth.ROLE_ADMIN: "Administrador do Cliente",
+    auth.ROLE_MEZZOLD_MASTER: "Mezzold Master",
 }
 
 
@@ -80,6 +81,31 @@ def friendly_status(value: object) -> str:
     return STATUS_LABELS.get(text, text)
 
 
+def campaign_primary_action(status: object) -> dict[str, object]:
+    value = str(status or "").strip()
+    if value == campaigns.CAMPAIGN_STATUS_PAUSED:
+        return {"label": "Continuar", "enabled": True, "allow_resume": True, "message": ""}
+    if value in {campaigns.CAMPAIGN_STATUS_DRAFT, campaigns.CAMPAIGN_STATUS_SCHEDULED}:
+        return {"label": "Iniciar", "enabled": True, "allow_resume": False, "message": ""}
+    if value in {campaigns.CAMPAIGN_STATUS_DONE, campaigns.CAMPAIGN_STATUS_DONE_LEGACY}:
+        return {
+            "label": "Concluída",
+            "enabled": False,
+            "allow_resume": False,
+            "message": "Campanha concluída não pode ser reiniciada. Use Reenviar para criar uma nova campanha.",
+        }
+    if value == campaigns.CAMPAIGN_STATUS_CANCELLED:
+        return {
+            "label": "Cancelada",
+            "enabled": False,
+            "allow_resume": False,
+            "message": "Campanha cancelada não pode continuar diretamente. Use Reenviar para criar uma nova campanha.",
+        }
+    if value == campaigns.CAMPAIGN_STATUS_SENDING:
+        return {"label": "Em andamento", "enabled": False, "allow_resume": False, "message": "Campanha já está em andamento."}
+    return {"label": "Iniciar", "enabled": False, "allow_resume": False, "message": f"Campanha com status '{value}' não está liberada para início."}
+
+
 def sidebar_labels_for_role(role: str) -> list[str]:
     normalized = str(role or "").strip().lower()
     base = [
@@ -93,9 +119,9 @@ def sidebar_labels_for_role(role: str) -> list[str]:
         "Histórico",
         "Configurações",
     ]
-    if normalized in (auth.ROLE_EQUIPE, auth.ROLE_ADMIN):
+    if normalized in (auth.ROLE_EQUIPE, auth.ROLE_ADMIN, auth.ROLE_MEZZOLD_MASTER):
         base.insert(5, "Aquecer números")
-    if normalized == auth.ROLE_ADMIN:
+    if auth.can_manage_users(normalized):
         base.append("Gerenciar usuários")
     return base
 
@@ -117,6 +143,8 @@ class MezzoldApp(SettingsScreenMixin, tk.Tk):
         self._start_minimized = start_minimized
         self._active_scroll_canvas: tk.Canvas | None = None
         self._mousewheel_bound = False
+        self._scroll_canvases: list[tk.Canvas] = []
+        self._campaign_history_windows: dict[int, tk.Toplevel] = {}
 
         self._configure_style()
         self.show_login()
@@ -352,25 +380,34 @@ class MezzoldApp(SettingsScreenMixin, tk.Tk):
         scrollbar = ttk.Scrollbar(parent, orient="vertical", command=canvas.yview)
         inner = ttk.Frame(canvas)
         window_id = canvas.create_window((0, 0), window=inner, anchor="nw")
+        self._scroll_canvases.append(canvas)
         self._active_scroll_canvas = canvas
         self._ensure_mousewheel_binding()
 
         def configure_inner(_event: object | None = None) -> None:
-            canvas.configure(scrollregion=canvas.bbox("all"))
+            canvas.configure(scrollregion=canvas.bbox("all") or (0, 0, 0, 0))
 
         def configure_canvas(event: tk.Event) -> None:
             canvas.itemconfigure(window_id, width=event.width)
+            canvas.after_idle(configure_inner)
 
         def activate_scroll(_event: object | None = None) -> None:
             self._active_scroll_canvas = canvas
 
+        def deactivate_scroll(_event: object | None = None) -> None:
+            if self._active_scroll_canvas is canvas:
+                self._active_scroll_canvas = None
+
         inner.bind("<Configure>", configure_inner)
         inner.bind("<Enter>", activate_scroll)
+        inner.bind("<Leave>", deactivate_scroll)
         canvas.bind("<Configure>", configure_canvas)
         canvas.bind("<Enter>", activate_scroll)
+        canvas.bind("<Leave>", deactivate_scroll)
         canvas.configure(yscrollcommand=scrollbar.set)
         canvas.pack(side="left", fill="both", expand=True)
         scrollbar.pack(side="right", fill="y")
+        canvas.after_idle(configure_inner)
         return inner
 
     def _ensure_mousewheel_binding(self) -> None:
@@ -382,7 +419,7 @@ class MezzoldApp(SettingsScreenMixin, tk.Tk):
         self._mousewheel_bound = True
 
     def _on_global_mousewheel(self, event: tk.Event) -> str | None:
-        canvas = self._active_scroll_canvas
+        canvas = self._scroll_canvas_under_pointer() or self._active_scroll_canvas
         if canvas is None:
             return None
         try:
@@ -397,6 +434,23 @@ class MezzoldApp(SettingsScreenMixin, tk.Tk):
         except tk.TclError:
             self._active_scroll_canvas = None
         return None
+
+    def _scroll_canvas_under_pointer(self) -> tk.Canvas | None:
+        alive: list[tk.Canvas] = []
+        match: tk.Canvas | None = None
+        for canvas in self._scroll_canvases:
+            try:
+                if not canvas.winfo_exists():
+                    continue
+                alive.append(canvas)
+                if self._pointer_inside_widget(canvas):
+                    match = canvas
+            except tk.TclError:
+                continue
+        self._scroll_canvases = alive
+        if match is not None:
+            self._active_scroll_canvas = match
+        return match
 
     def _pointer_inside_widget(self, widget: tk.Widget) -> bool:
         pointer_x, pointer_y = self.winfo_pointerxy()
@@ -421,10 +475,12 @@ class MezzoldApp(SettingsScreenMixin, tk.Tk):
         return str(self.current_user.role or auth.ROLE_CLIENTE)
 
     def _role_label(self) -> str:
-        return ROLE_LABELS.get(self._current_role(), "Cliente")
+        return ROLE_LABELS.get(self._current_role(), "Operador")
 
     def _has_role(self, role: str) -> bool:
         current = self._current_role()
+        if auth.is_master_role(current):
+            return True
         if current == auth.ROLE_ADMIN:
             return True
         if role == auth.ROLE_CLIENTE:
@@ -434,7 +490,10 @@ class MezzoldApp(SettingsScreenMixin, tk.Tk):
         return current == role
 
     def _is_admin(self) -> bool:
-        return self._current_role() == auth.ROLE_ADMIN
+        return auth.can_manage_users(self._current_role())
+
+    def _is_master(self) -> bool:
+        return bool(self.current_user and auth.is_master_user(self.current_user))
 
     def _require_admin(self) -> bool:
         if self._is_admin():
@@ -822,6 +881,8 @@ class MezzoldApp(SettingsScreenMixin, tk.Tk):
         edit_contact_button.pack(side="left", padx=(8, 0))
         import_folder_button = ttk.Button(content_actions, text="Importar para esta pasta")
         import_folder_button.pack(side="left", padx=(8, 0))
+        export_contacts_button = ttk.Button(content_actions, text="Exportar contatos")
+        export_contacts_button.pack(side="left", padx=(8, 0))
 
         notebook = ttk.Notebook(content)
         notebook.pack(fill="both", expand=True)
@@ -1176,6 +1237,25 @@ class MezzoldApp(SettingsScreenMixin, tk.Tk):
                 return
             self.show_import_contacts(folder_name)
 
+        def export_current_contacts() -> None:
+            folder_name = current_folder_name()
+            scope_label = folder_name or "todos_os_contatos"
+            path = filedialog.asksaveasfilename(
+                title="Exportar contatos",
+                defaultextension=".csv",
+                initialfile=f"mezzold_contatos_{scope_label.replace(' ', '_')}.csv",
+                filetypes=[("CSV", "*.csv"), ("Todos", "*.*")],
+            )
+            if not path:
+                return
+            try:
+                total = contacts.export_contacts_csv(path, group_name=folder_name, search=search.get())
+            except contacts.ContactError as exc:
+                messagebox.showerror(APP_TITLE, str(exc))
+                return
+            messagebox.showinfo(APP_TITLE, f"{total} contato(s) exportado(s) para:\n{path}")
+            self._set_status(f"Contatos exportados: {path}")
+
         folder_tree.bind("<<TreeviewSelect>>", on_folder_select)
         search_entry.bind("<Return>", lambda _event: refresh_contacts())
         notebook.bind("<<NotebookTabChanged>>", lambda _event: refresh_contacts())
@@ -1190,6 +1270,7 @@ class MezzoldApp(SettingsScreenMixin, tk.Tk):
         add_contact_button.configure(command=lambda: open_contact_dialog())
         edit_contact_button.configure(command=edit_selected_contact)
         import_folder_button.configure(command=import_to_current_folder)
+        export_contacts_button.configure(command=export_current_contacts)
 
         refresh_folders()
 
@@ -1342,6 +1423,7 @@ class MezzoldApp(SettingsScreenMixin, tk.Tk):
         tree.pack(fill="both", expand=True)
 
         extracted_by_iid: dict[str, dict[str, object]] = {}
+        current_leads: list[dict[str, str]] = []
 
         def refresh_lead_rows(leads: list[dict[str, str]]) -> None:
             tree.delete(*tree.get_children())
@@ -1365,13 +1447,21 @@ class MezzoldApp(SettingsScreenMixin, tk.Tk):
                 messagebox.showwarning(APP_TITLE, "Cole o conteudo do Google Maps antes de extrair.")
                 return
             leads = contacts.extract_leads_from_text(pasted)
-            refresh_lead_rows(leads)
             if not leads:
                 result.set("Nenhum telefone valido foi encontrado nesse conteudo.")
                 self._set_status("Nenhum telefone encontrado na colagem.")
                 return
-            result.set(f"{len(leads)} lead(s) identificado(s). Selecione os que deseja importar.")
-            self._set_status(f"{len(leads)} lead(s) extraido(s) da colagem.")
+            merged, summary = contacts.merge_lead_results(current_leads, leads)
+            current_leads[:] = merged
+            refresh_lead_rows(current_leads)
+            db_phones = {str(item.get("phone") or "") for item in contacts.list_contacts()}
+            already_saved = sum(1 for item in leads if str(item.get("phone") or "") in db_phones)
+            result.set(
+                f"Rodada: {summary.round_found} identificado(s), {summary.added} novo(s), "
+                f"{summary.duplicates} duplicado(s) na lista, {already_saved} ja existente(s) no banco. "
+                f"Total na lista atual: {summary.total}."
+            )
+            self._set_status(f"{summary.added} novo(s) lead(s) adicionados. Total na lista: {summary.total}.")
 
         def select_all_leads() -> None:
             children = tree.get_children()
@@ -1380,6 +1470,7 @@ class MezzoldApp(SettingsScreenMixin, tk.Tk):
 
         def clear_search() -> None:
             source_box.delete("1.0", "end")
+            current_leads.clear()
             refresh_lead_rows([])
             result.set("Cole o conteudo do Google Maps abaixo para extrair os telefones.")
             self._set_status("Busca de leads limpa.")
@@ -1816,8 +1907,19 @@ class MezzoldApp(SettingsScreenMixin, tk.Tk):
 
         def send_now() -> None:
             campaign_id = selected_campaign_id()
-            if campaign_id:
-                self._start_campaign_thread(campaign_id, progress, source="ui_manual")
+            item = selected_campaign()
+            if not campaign_id or not item:
+                return
+            action = campaign_primary_action(item.get("status"))
+            if not action["enabled"]:
+                messagebox.showinfo(APP_TITLE, str(action["message"] or "Esta campanha não pode ser iniciada agora."))
+                return
+            self._start_campaign_thread(
+                campaign_id,
+                progress,
+                source="ui_continue" if action["allow_resume"] else "ui_manual",
+                allow_resume=bool(action["allow_resume"]),
+            )
 
         def pause() -> None:
             campaign_id = selected_campaign_id()
@@ -1903,14 +2005,12 @@ class MezzoldApp(SettingsScreenMixin, tk.Tk):
         open_button.pack(side="left", padx=(8, 0))
         resend_button = ttk.Button(top, text="Reenviar")
         resend_button.pack(side="left", padx=(8, 0))
-        send_button = ttk.Button(top, text="Iniciar agora", style="Accent.TButton")
+        send_button = ttk.Button(top, text="Iniciar", style="Accent.TButton")
         send_button.pack(side="left", padx=(8, 0))
         schedule_button = ttk.Button(top, text="Agendar")
         schedule_button.pack(side="left", padx=(8, 0))
         pause_button = ttk.Button(top, text="Pausar")
         pause_button.pack(side="left", padx=(8, 0))
-        continue_button = ttk.Button(top, text="Continuar")
-        continue_button.pack(side="left", padx=(8, 0))
         cancel_button = ttk.Button(top, text="Cancelar")
         cancel_button.pack(side="left", padx=(8, 0))
         history_button = ttk.Button(top, text="Ver historico")
@@ -2023,6 +2123,7 @@ class MezzoldApp(SettingsScreenMixin, tk.Tk):
                 delay_details.set("")
                 details.set("Nenhuma campanha selecionada.")
                 progress.set("Escolha uma campanha.")
+                send_button.configure(text="Iniciar", state="disabled")
                 return
             name_var.set(str(item.get("name") or ""))
             scheduled_at.set(str(item.get("scheduled_at") or ""))
@@ -2044,6 +2145,13 @@ class MezzoldApp(SettingsScreenMixin, tk.Tk):
                 f"Atualizada em: {item.get('updated_at') or ''}"
             )
             progress.set(progress_label(item))
+            action = campaign_primary_action(item.get("status"))
+            send_button.configure(
+                text=str(action["label"]),
+                state="normal" if action["enabled"] else "disabled",
+            )
+            if action["message"]:
+                progress.set(str(action["message"]))
 
         def refresh(select_id: int | None = None) -> None:
             current = select_id or selected_campaign_id(show_warning=False)
@@ -2113,11 +2221,6 @@ class MezzoldApp(SettingsScreenMixin, tk.Tk):
             refresh(new_campaign_id)
             duplicated = campaigns.get_campaign(new_campaign_id) or {}
             self._set_status(f"Campanha duplicada para reenvio: {duplicated.get('name') or new_campaign_id}.")
-
-        def continue_campaign() -> None:
-            campaign_id = selected_campaign_id()
-            if campaign_id:
-                self._start_campaign_thread(campaign_id, progress, source="ui_continue", allow_resume=True)
 
         def pause() -> None:
             campaign_id = selected_campaign_id()
@@ -2252,9 +2355,23 @@ class MezzoldApp(SettingsScreenMixin, tk.Tk):
             campaign_id = selected_campaign_id()
             if not campaign_id:
                 return
+            existing = self._campaign_history_windows.get(campaign_id)
+            if existing is not None:
+                try:
+                    if existing.winfo_exists():
+                        existing.lift()
+                        existing.focus_force()
+                        return
+                except tk.TclError:
+                    self._campaign_history_windows.pop(campaign_id, None)
             dialog = tk.Toplevel(self)
+            self._campaign_history_windows[campaign_id] = dialog
             dialog.title(f"Historico da campanha #{campaign_id}")
             dialog.geometry("980x520")
+            dialog.protocol(
+                "WM_DELETE_WINDOW",
+                lambda: (self._campaign_history_windows.pop(campaign_id, None), dialog.destroy()),
+            )
             panel = ttk.Frame(dialog, padding=16)
             panel.pack(fill="both", expand=True)
             logs = campaigns.list_campaign_logs(campaign_id)
@@ -2313,7 +2430,6 @@ class MezzoldApp(SettingsScreenMixin, tk.Tk):
         send_button.configure(command=send_now)
         schedule_button.configure(command=schedule_selected)
         pause_button.configure(command=pause)
-        continue_button.configure(command=continue_campaign)
         cancel_button.configure(command=cancel)
         history_button.configure(command=show_campaign_history)
         save_button.configure(command=save_changes)
@@ -2508,21 +2624,23 @@ class MezzoldApp(SettingsScreenMixin, tk.Tk):
 
     def show_number_health(self) -> None:
         frame = self._screen("Aquecimento dos números")
-        stats = warmup.dashboard_stats()
         if not self._has_role(auth.ROLE_EQUIPE):
-            messagebox.showerror(APP_TITLE, "Acesso restrito para Equipe ou Administrador.")
+            messagebox.showerror(APP_TITLE, "Acesso restrito para Administrador do Cliente ou Mezzold Master.")
             return
+        frame = self._scrollable_frame(frame)
         metrics = ttk.Frame(frame)
         metrics.pack(fill="x", pady=(0, 12))
+        metric_vars: dict[str, tk.StringVar] = {}
         for label, value in [
-            ("Números", stats["total"]),
-            ("Ativos", stats["active"]),
-            ("Prontos para campanha", stats["ready"]),
-            ("Pausados", stats["paused"]),
+            ("Números", "total"),
+            ("Ativos", "active"),
+            ("Prontos para campanha", "ready"),
+            ("Pausados", "paused"),
         ]:
+            metric_vars[value] = tk.StringVar(value="0")
             card = ttk.Frame(metrics, style="Panel.TFrame", padding=12)
             card.pack(side="left", fill="x", expand=True, padx=(0, 10))
-            ttk.Label(card, text=str(value), style="Metric.TLabel").pack(anchor="w")
+            ttk.Label(card, textvariable=metric_vars[value], style="Metric.TLabel").pack(anchor="w")
             ttk.Label(card, text=label, style="Muted.TLabel").pack(anchor="w")
 
         body = ttk.Frame(frame)
@@ -2641,12 +2759,18 @@ class MezzoldApp(SettingsScreenMixin, tk.Tk):
             active.set(True)
             ready.set(False)
 
-        def refresh() -> None:
+        def refresh(select_id: int | None = None) -> None:
+            stats = warmup.dashboard_stats()
+            for key, variable in metric_vars.items():
+                variable.set(str(stats[key]))
             tree.delete(*tree.get_children())
+            selected_iid = ""
             for item in warmup.list_numbers():
+                iid = str(item["id"])
                 tree.insert(
                     "",
                     "end",
+                    iid=iid,
                     values=(
                         item["id"],
                         item["display_name"],
@@ -2660,6 +2784,12 @@ class MezzoldApp(SettingsScreenMixin, tk.Tk):
                         "Sim" if item["ready_for_campaigns"] else "Nao",
                     ),
                 )
+                if select_id and int(item["id"]) == int(select_id):
+                    selected_iid = iid
+            if selected_iid:
+                tree.selection_set(selected_iid)
+                tree.focus(selected_iid)
+                tree.see(selected_iid)
             event_tree.delete(*event_tree.get_children())
             for event in warmup.list_recent_events():
                 event_tree.insert(
@@ -2739,7 +2869,7 @@ class MezzoldApp(SettingsScreenMixin, tk.Tk):
             except (ValueError, warmup.WarmupError) as exc:
                 messagebox.showerror(APP_TITLE, str(exc))
                 return
-            refresh()
+            refresh(selected_id.get())
             self._set_status("Número salvo.")
 
         def delete() -> None:
@@ -2753,8 +2883,12 @@ class MezzoldApp(SettingsScreenMixin, tk.Tk):
 
         def start() -> None:
             number_id = selected_number_id()
-            if number_id:
-                self._start_number_warmup_thread(number_id, group_name.get(), progress)
+            if not number_id:
+                return
+            if not group_name.get().strip():
+                messagebox.showwarning(APP_TITLE, "Escolha um grupo de clientes para testar.")
+                return
+            self._start_number_warmup_thread(number_id, group_name.get(), progress)
 
         def stop() -> None:
             number_id = selected_number_id()
@@ -2764,16 +2898,48 @@ class MezzoldApp(SettingsScreenMixin, tk.Tk):
             if event:
                 event.set()
                 progress.set("Pausa solicitada.")
+            try:
+                warmup.update_number(number_id, status="paused")
+            except warmup.WarmupError as exc:
+                messagebox.showerror(APP_TITLE, str(exc))
+                return
+            refresh(number_id)
+
+        def mark_ready() -> None:
+            number_id = selected_number_id()
+            if not number_id:
+                return
+            try:
+                warmup.update_number(number_id, status="healthy", quality_rating="high", ready_for_campaigns=True, active=True)
+            except warmup.WarmupError as exc:
+                messagebox.showerror(APP_TITLE, str(exc))
+                return
+            refresh(number_id)
+            self._set_status("Número marcado como pronto para campanhas.")
+
+        def deactivate() -> None:
+            number_id = selected_number_id()
+            if not number_id:
+                return
+            try:
+                warmup.update_number(number_id, active=False, status="paused", ready_for_campaigns=False)
+            except warmup.WarmupError as exc:
+                messagebox.showerror(APP_TITLE, str(exc))
+                return
+            refresh(number_id)
+            self._set_status("Número desativado.")
 
         tree.bind("<<TreeviewSelect>>", on_select)
         actions = ttk.Frame(form, style="Panel.TFrame")
         actions.pack(fill="x", pady=(6, 0))
         ttk.Button(actions, text="Novo", command=clear_form).grid(row=0, column=0, sticky="ew", pady=(0, 6))
-        ttk.Button(actions, text="Salvar", style="Accent.TButton", command=save).grid(row=0, column=1, sticky="ew", padx=(8, 0), pady=(0, 6))
+        ttk.Button(actions, text="Salvar número", style="Accent.TButton", command=save).grid(row=0, column=1, sticky="ew", padx=(8, 0), pady=(0, 6))
         ttk.Button(actions, text="Iniciar aquecimento", style="Accent.TButton", command=start).grid(row=1, column=0, sticky="ew", pady=(0, 6))
-        ttk.Button(actions, text="Pausar", command=stop).grid(row=1, column=1, sticky="ew", padx=(8, 0), pady=(0, 6))
-        ttk.Button(actions, text="Excluir", command=delete).grid(row=2, column=0, sticky="ew")
-        ttk.Button(actions, text="Atualizar", command=refresh).grid(row=2, column=1, sticky="ew", padx=(8, 0))
+        ttk.Button(actions, text="Pausar aquecimento", command=stop).grid(row=1, column=1, sticky="ew", padx=(8, 0), pady=(0, 6))
+        ttk.Button(actions, text="Marcar como pronto", command=mark_ready).grid(row=2, column=0, sticky="ew", pady=(0, 6))
+        ttk.Button(actions, text="Desativar número", command=deactivate).grid(row=2, column=1, sticky="ew", padx=(8, 0), pady=(0, 6))
+        ttk.Button(actions, text="Excluir", command=delete).grid(row=3, column=0, sticky="ew")
+        ttk.Button(actions, text="Atualizar", command=lambda: refresh(selected_id.get() or None)).grid(row=3, column=1, sticky="ew", padx=(8, 0))
         actions.columnconfigure(0, weight=1)
         actions.columnconfigure(1, weight=1)
         refresh()
@@ -2805,8 +2971,20 @@ class MezzoldApp(SettingsScreenMixin, tk.Tk):
         selected_user_id = tk.IntVar(value=0)
         username = tk.StringVar()
         password = tk.StringVar()
-        role = tk.StringVar(value=auth.ROLE_CLIENTE)
+        role = tk.StringVar(value=ROLE_LABELS[auth.ROLE_CLIENTE])
         active = tk.BooleanVar(value=True)
+        role_value_by_label = {
+            ROLE_LABELS[auth.ROLE_CLIENTE]: auth.ROLE_CLIENTE,
+            ROLE_LABELS[auth.ROLE_ADMIN]: auth.ROLE_ADMIN,
+        }
+        if self._is_master():
+            role_value_by_label[ROLE_LABELS[auth.ROLE_MEZZOLD_MASTER]] = auth.ROLE_MEZZOLD_MASTER
+
+        def role_label(value: object) -> str:
+            return ROLE_LABELS.get(str(value), ROLE_LABELS[auth.ROLE_CLIENTE])
+
+        def selected_role_value() -> str:
+            return role_value_by_label.get(role.get(), auth.ROLE_CLIENTE)
 
         self._entry(form, "Usuário", username).grid(row=0, column=0, sticky="ew", padx=(0, 8))
         self._entry(form, "Senha", password, show="*").grid(row=0, column=1, sticky="ew", padx=(0, 8))
@@ -2817,7 +2995,7 @@ class MezzoldApp(SettingsScreenMixin, tk.Tk):
         ttk.Combobox(
             role_holder,
             textvariable=role,
-            values=(auth.ROLE_CLIENTE, auth.ROLE_EQUIPE, auth.ROLE_ADMIN),
+            values=tuple(role_value_by_label),
             state="readonly",
         ).pack(fill="x")
 
@@ -2855,16 +3033,18 @@ class MezzoldApp(SettingsScreenMixin, tk.Tk):
                 return
             selected_user_id.set(user_id)
             username.set(str(current["username"]))
-            role.set(str(current["role"]))
+            role.set(role_label(current["role"]))
             active.set(bool(current["is_active"]))
             password.set("")
 
         def create_user() -> None:
             try:
+                if selected_role_value() == auth.ROLE_MEZZOLD_MASTER and not self._is_master():
+                    raise auth.AuthError("Apenas o Mezzold Master pode criar outro acesso master.")
                 auth.create_user(
                     username.get(),
                     password.get(),
-                    role=role.get(),
+                    role=selected_role_value(),
                     must_change_password=True,
                     is_active=active.get(),
                 )
@@ -2878,17 +3058,29 @@ class MezzoldApp(SettingsScreenMixin, tk.Tk):
             user_id = selected_id()
             if not user_id:
                 return
-            auth.update_user_role(user_id, role.get())
-            if active.get():
-                auth.activate_user(user_id)
-            else:
-                auth.deactivate_user(user_id)
+            current = next((item for item in auth.list_users() if int(item["id"]) == user_id), None)
+            if current and auth.is_master_bootstrap_username(str(current["username"])) and not self._is_master():
+                messagebox.showerror(APP_TITLE, "Apenas o Mezzold Master pode alterar o usuario 000.")
+                return
+            try:
+                auth.update_user_role(user_id, selected_role_value())
+                if active.get():
+                    auth.activate_user(user_id)
+                else:
+                    auth.deactivate_user(user_id)
+            except auth.AuthError as exc:
+                messagebox.showerror(APP_TITLE, str(exc))
+                return
             refresh()
             self._set_status("Perfil atualizado.")
 
         def reset_password() -> None:
             user_id = selected_id()
             if not user_id:
+                return
+            current = next((item for item in auth.list_users() if int(item["id"]) == user_id), None)
+            if current and auth.is_master_bootstrap_username(str(current["username"])):
+                messagebox.showerror(APP_TITLE, "A senha do Mezzold Master e gerenciada pelo bootstrap interno.")
                 return
             try:
                 auth.reset_user_password(user_id, password.get(), must_change_password=True)
@@ -3064,8 +3256,16 @@ class MezzoldApp(SettingsScreenMixin, tk.Tk):
         if number_id in self.running_warmups:
             messagebox.showinfo(APP_TITLE, "Este número já está em aquecimento.")
             return
-        if not whatsapp.load_config().dry_run and not network.has_internet():
+        config = whatsapp.load_config()
+        if not config.dry_run and not network.has_internet():
             self._require_internet()
+            return
+        if (
+            not config.dry_run
+            and config.delivery_mode == whatsapp.DELIVERY_MODE_WHATSAPP_WEB_EXPERIMENTAL
+            and whatsapp.get_whatsapp_web_status()["status"] != whatsapp.WEB_STATUS_CONNECTED
+        ):
+            messagebox.showerror(APP_TITLE, "WhatsApp Web ainda não está conectado. Use Configurações > Conectar / abrir WhatsApp Web antes de aquecer.")
             return
 
         event = threading.Event()

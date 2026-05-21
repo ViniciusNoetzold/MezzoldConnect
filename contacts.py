@@ -45,6 +45,14 @@ class ImportSummary:
     errors: list[str] = field(default_factory=list)
 
 
+@dataclass
+class LeadMergeSummary:
+    total: int = 0
+    round_found: int = 0
+    added: int = 0
+    duplicates: int = 0
+
+
 def normalize_text(value: str) -> str:
     value = unicodedata.normalize("NFKD", value or "")
     value = "".join(char for char in value if not unicodedata.combining(char))
@@ -380,6 +388,48 @@ def list_contacts(search: str = "", group_name: str = "") -> list[dict[str, obje
     with connect() as conn:
         rows = conn.execute(query, tuple(params)).fetchall()
     return rows_to_dicts(rows)
+
+
+def export_contacts_csv(path_text: str, group_name: str = "", search: str = "") -> int:
+    path = Path(path_text)
+    if not path.parent.exists():
+        raise ContactError("A pasta escolhida para exportar nao existe.")
+
+    items = list_contacts(search=search, group_name=group_name)
+    with path.open("w", newline="", encoding="utf-8-sig") as handle:
+        writer = csv.DictWriter(
+            handle,
+            fieldnames=[
+                "nome",
+                "telefone",
+                "pasta/grupo",
+                "status",
+                "observacoes",
+                "criado_em",
+                "atualizado_em",
+            ],
+            delimiter=";",
+        )
+        writer.writeheader()
+        for item in items:
+            if item.get("blacklisted"):
+                status = "bloqueado"
+            elif not item.get("opt_in"):
+                status = "sem_opt_in"
+            else:
+                status = "ativo"
+            writer.writerow(
+                {
+                    "nome": item.get("name") or "",
+                    "telefone": item.get("phone") or "",
+                    "pasta/grupo": item.get("group_name") or "",
+                    "status": status,
+                    "observacoes": item.get("notes") or item.get("consent_notes") or "",
+                    "criado_em": item.get("created_at") or "",
+                    "atualizado_em": item.get("updated_at") or "",
+                }
+            )
+    return len(items)
 
 
 def get_contact(contact_id: int) -> dict[str, object] | None:
@@ -747,6 +797,50 @@ def extract_leads_from_text(text: str) -> list[dict[str, str]]:
             )
 
     return found
+
+
+def merge_lead_results(
+    current: Iterable[dict[str, object]],
+    incoming: Iterable[dict[str, object]],
+) -> tuple[list[dict[str, str]], LeadMergeSummary]:
+    merged: list[dict[str, str]] = []
+    by_phone: dict[str, dict[str, str]] = {}
+
+    for lead in current:
+        phone = normalize_phone(str(lead.get("phone") or ""))
+        if not phone or not is_valid_phone(phone) or phone in by_phone:
+            continue
+        item = {
+            "name": str(lead.get("name") or "").strip(),
+            "phone": phone,
+            "source": str(lead.get("source") or "").strip(),
+        }
+        by_phone[phone] = item
+        merged.append(item)
+
+    summary = LeadMergeSummary(total=len(merged))
+    for index, lead in enumerate(incoming, start=1):
+        summary.round_found += 1
+        phone = normalize_phone(str(lead.get("phone") or ""))
+        if not phone or not is_valid_phone(phone):
+            continue
+        name = str(lead.get("name") or "").strip() or f"Lead {index}"
+        source = str(lead.get("source") or "").strip()
+        existing = by_phone.get(phone)
+        if existing:
+            summary.duplicates += 1
+            if name and existing.get("name", "").startswith("Lead "):
+                existing["name"] = name
+            if source and not existing.get("source"):
+                existing["source"] = source
+            continue
+        item = {"name": name, "phone": phone, "source": source}
+        by_phone[phone] = item
+        merged.append(item)
+        summary.added += 1
+
+    summary.total = len(merged)
+    return merged, summary
 
 
 def import_leads(leads: Iterable[dict[str, object]], folder_name: str = "") -> ImportSummary:
