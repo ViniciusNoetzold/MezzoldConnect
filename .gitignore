@@ -1,23 +1,66 @@
+# Python
 __pycache__/
 *.py[cod]
+*$py.class
 .venv/
 venv/
-build/
-dist/
+env/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# Dados locais, bancos e logs
+data/
+*.sqlite
+*.sqlite3
+*.db
+*.log
 logs/
+send_flow.log
+whatsapp_web_experimental_profile/
+
+# Credenciais e configuração local
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.p12
+*.pfx
+
+# Node.js
 node_modules/
 coverage/
+.npm/
+*.tsbuildinfo
+
+# Builds Python, Node e instaladores
+build/
+dist/
+installer/staging/
+installer/*.exe
+installer/*.sed
+installer/Mezzold Connect Setup.spec
 *.spec
 !Mezzold Connect.spec
-installer/staging/
-installer/*.sed
 
-.env
-data/
-whatsapp_web_experimental_profile/
-*.sqlite3
-
+# Arquivos legados gerados em execução
 usuarios.csv
 contatos_db.csv
 log_envios.txt
 blacklist.txt
+
+# IDEs
+.idea/
+.vscode/
+*.code-workspace
+
+# Sistema operacional e temporários
+.DS_Store
+Thumbs.db
+*.tmp
+*.bak
+*.swp
+*~
