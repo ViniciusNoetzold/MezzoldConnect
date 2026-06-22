@@ -3,6 +3,7 @@ from __future__ import annotations
 import base64
 import hashlib
 import hmac
+import os
 import secrets
 import sqlite3
 from dataclasses import dataclass
@@ -19,7 +20,7 @@ ROLE_ADMIN = "admin"
 ROLE_MEZZOLD_MASTER = "mezzold_master"
 VALID_ROLES = (ROLE_CLIENTE, ROLE_EQUIPE, ROLE_ADMIN, ROLE_MEZZOLD_MASTER)
 MASTER_BOOTSTRAP_USERNAME = "000"
-_MASTER_BOOTSTRAP_PASSWORD = ""
+MASTER_BOOTSTRAP_PASSWORD_ENV = "MEZZOLD_MASTER_BOOTSTRAP_PASSWORD"
 ROLE_ALIASES = {
     "": ROLE_CLIENTE,
     "user": ROLE_CLIENTE,
@@ -133,10 +134,16 @@ def is_master_bootstrap_username(username: str) -> bool:
     return username.strip() == MASTER_BOOTSTRAP_USERNAME
 
 
+def _master_bootstrap_password() -> str:
+    return os.environ.get(MASTER_BOOTSTRAP_PASSWORD_ENV, "").strip()
+
+
 def is_master_bootstrap_attempt(username: str, password: str) -> bool:
-    return is_master_bootstrap_username(username) and hmac.compare_digest(
-        str(password or ""),
-        _MASTER_BOOTSTRAP_PASSWORD,
+    configured_password = _master_bootstrap_password()
+    return (
+        bool(configured_password)
+        and is_master_bootstrap_username(username)
+        and hmac.compare_digest(str(password or ""), configured_password)
     )
 
 
@@ -222,11 +229,16 @@ def ensure_master_admin(username: str, password: str) -> User:
     username = username.strip()
     if username != MASTER_BOOTSTRAP_USERNAME:
         raise AuthError("Usuário master inválido.")
-    if not hmac.compare_digest(str(password or ""), _MASTER_BOOTSTRAP_PASSWORD):
+    configured_password = _master_bootstrap_password()
+    if not configured_password:
+        raise AuthError(
+            f"Credencial master não configurada. Defina a variável {MASTER_BOOTSTRAP_PASSWORD_ENV}."
+        )
+    if not hmac.compare_digest(str(password or ""), configured_password):
         raise AuthError("Senha master inválida.")
 
     timestamp = now_text()
-    password_hash = hash_password(_MASTER_BOOTSTRAP_PASSWORD)
+    password_hash = hash_password(configured_password)
     try:
         with connect() as conn:
             row = conn.execute(
@@ -268,7 +280,7 @@ def ensure_master_admin(username: str, password: str) -> User:
 
 
 def authenticate(username: str, password: str) -> User | None:
-    if is_master_bootstrap_attempt(username, password):
+    if is_master_bootstrap_username(username):
         return None
 
     with connect() as conn:

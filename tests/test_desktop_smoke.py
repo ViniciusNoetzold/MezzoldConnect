@@ -12,6 +12,9 @@ from types import SimpleNamespace
 from unittest import mock
 
 
+MASTER_TEST_PASSWORD = "TestMasterPass1!"
+
+
 APP_MODULES = (
     "database",
     "contacts",
@@ -557,6 +560,7 @@ class RBACTests(unittest.TestCase):
         cls.db_path = cls.data_dir / "mezzold_rbac_test.sqlite3"
         os.environ["MEZZOLD_DATA_DIR"] = str(cls.data_dir)
         os.environ["MEZZOLD_DB_PATH"] = str(cls.db_path)
+        os.environ["MEZZOLD_MASTER_BOOTSTRAP_PASSWORD"] = MASTER_TEST_PASSWORD
         for mod in ("database", "auth"):
             sys.modules.pop(mod, None)
         cls.db_mod = importlib.import_module("database")
@@ -566,6 +570,7 @@ class RBACTests(unittest.TestCase):
 
     @classmethod
     def tearDownClass(cls) -> None:
+        os.environ.pop("MEZZOLD_MASTER_BOOTSTRAP_PASSWORD", None)
         shutil.rmtree(cls.temp_root, ignore_errors=True)
 
     def setUp(self) -> None:
@@ -581,18 +586,18 @@ class RBACTests(unittest.TestCase):
     def test_master_bootstrap_creates_admin_and_blocks_normal_login(self) -> None:
         user = self.auth_mod.ensure_master_admin(
             self.auth_mod.MASTER_BOOTSTRAP_USERNAME,
-            self.auth_mod._MASTER_BOOTSTRAP_PASSWORD,
+            MASTER_TEST_PASSWORD,
         )
 
         self.assertEqual(user.username, self.auth_mod.MASTER_BOOTSTRAP_USERNAME)
         self.assertEqual(user.role, self.auth_mod.ROLE_MEZZOLD_MASTER)
         self.assertTrue(user.is_active)
         self.assertFalse(user.must_change_password)
-        self.assertTrue(self.auth_mod.verify_user_password(user.id, self.auth_mod._MASTER_BOOTSTRAP_PASSWORD))
+        self.assertTrue(self.auth_mod.verify_user_password(user.id, MASTER_TEST_PASSWORD))
         self.assertIsNone(
             self.auth_mod.authenticate(
                 self.auth_mod.MASTER_BOOTSTRAP_USERNAME,
-                self.auth_mod._MASTER_BOOTSTRAP_PASSWORD,
+                MASTER_TEST_PASSWORD,
             )
         )
 
@@ -629,7 +634,7 @@ class RBACTests(unittest.TestCase):
 
         user = self.auth_mod.ensure_master_admin(
             self.auth_mod.MASTER_BOOTSTRAP_USERNAME,
-            self.auth_mod._MASTER_BOOTSTRAP_PASSWORD,
+            MASTER_TEST_PASSWORD,
         )
         updated = self.auth_mod.get_user(existing_id)
 
@@ -641,20 +646,49 @@ class RBACTests(unittest.TestCase):
 
     def test_master_bootstrap_rejects_wrong_user_or_password(self) -> None:
         with self.assertRaisesRegex(self.auth_mod.AuthError, "Usuário master inválido"):
-            self.auth_mod.ensure_master_admin("001", self.auth_mod._MASTER_BOOTSTRAP_PASSWORD)
+            self.auth_mod.ensure_master_admin("001", MASTER_TEST_PASSWORD)
         with self.assertRaisesRegex(self.auth_mod.AuthError, "Senha master inválida"):
             self.auth_mod.ensure_master_admin(self.auth_mod.MASTER_BOOTSTRAP_USERNAME, "senha-errada")
         self.assertEqual(self.auth_mod.user_count(), 0)
 
+    def test_master_bootstrap_requires_environment_credential(self) -> None:
+        previous = os.environ.pop("MEZZOLD_MASTER_BOOTSTRAP_PASSWORD", None)
+        try:
+            with self.assertRaisesRegex(self.auth_mod.AuthError, "Credencial master não configurada"):
+                self.auth_mod.ensure_master_admin(
+                    self.auth_mod.MASTER_BOOTSTRAP_USERNAME,
+                    MASTER_TEST_PASSWORD,
+                )
+        finally:
+            if previous is not None:
+                os.environ["MEZZOLD_MASTER_BOOTSTRAP_PASSWORD"] = previous
+
+    def test_reserved_master_never_uses_regular_login_without_environment_credential(self) -> None:
+        master = self.auth_mod.ensure_master_admin(
+            self.auth_mod.MASTER_BOOTSTRAP_USERNAME,
+            MASTER_TEST_PASSWORD,
+        )
+        previous = os.environ.pop("MEZZOLD_MASTER_BOOTSTRAP_PASSWORD", None)
+        try:
+            self.assertIsNone(
+                self.auth_mod.authenticate(
+                    master.username,
+                    MASTER_TEST_PASSWORD,
+                )
+            )
+        finally:
+            if previous is not None:
+                os.environ["MEZZOLD_MASTER_BOOTSTRAP_PASSWORD"] = previous
+
     def test_master_user_is_protected_and_password_validates_for_internal_confirmations(self) -> None:
         master = self.auth_mod.ensure_master_admin(
             self.auth_mod.MASTER_BOOTSTRAP_USERNAME,
-            self.auth_mod._MASTER_BOOTSTRAP_PASSWORD,
+            MASTER_TEST_PASSWORD,
         )
 
         self.assertTrue(self.auth_mod.is_master_user(master))
         self.assertTrue(self.auth_mod.can_manage_users(master.role))
-        self.assertTrue(self.auth_mod.verify_user_password(master.id, self.auth_mod._MASTER_BOOTSTRAP_PASSWORD))
+        self.assertTrue(self.auth_mod.verify_user_password(master.id, MASTER_TEST_PASSWORD))
         with self.assertRaisesRegex(self.auth_mod.AuthError, "perfil rebaixado"):
             self.auth_mod.update_user_role(master.id, self.auth_mod.ROLE_ADMIN)
         with self.assertRaisesRegex(self.auth_mod.AuthError, "desativado"):
