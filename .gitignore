@@ -1,0 +1,47 @@
+﻿# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+*.pyc
+*.spec
+
+# Virtual environments
+.venv/
+.venv_build/
+venv/
+env/
+
+# Build artifacts
+build/
+dist/
+installer/build/
+*.egg-info/
+
+# Database & data (user data - not committed)
+data/
+*.sqlite3
+*.db
+*.sql
+
+# Logs
+*.log
+
+# OS
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# IDE
+.vscode/
+.idea/
+*.swp
+
+# Temp scripts
+fix_*.py
+verify_*.py
+test_*.py
+update_*.py
+rewrite_*.py
+clean_*.py
+check_*.py
