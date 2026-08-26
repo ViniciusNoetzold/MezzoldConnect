@@ -98,6 +98,51 @@ def _browser_label(browser_name: str) -> str:
     return {"chrome": "Chrome", "edge": "Edge"}.get(browser_name.lower(), browser_name.capitalize())
 
 
+def _selenium_browser_components(browser_name: str) -> tuple[Any, Any, Any]:
+    """Load concrete Selenium classes without relying on webdriver lazy imports.
+
+    Selenium 4.47 changed ``selenium.webdriver.Chrome``/``Edge`` to dynamic
+    imports.  Importing the concrete classes here both avoids that runtime
+    indirection and lets PyInstaller discover the exact modules used by the
+    WhatsApp Web provider.
+    """
+    if browser_name == "chrome":
+        from selenium.webdriver.chrome.options import Options as BrowserOptions
+        from selenium.webdriver.chrome.service import Service as BrowserService
+        from selenium.webdriver.chrome.webdriver import WebDriver as BrowserDriver
+    elif browser_name == "edge":
+        from selenium.webdriver.edge.options import Options as BrowserOptions
+        from selenium.webdriver.edge.service import Service as BrowserService
+        from selenium.webdriver.edge.webdriver import WebDriver as BrowserDriver
+    else:
+        raise WhatsAppWebSessionError(f"Navegador nao suportado: {browser_name}.")
+    return BrowserDriver, BrowserService, BrowserOptions
+
+
+def selenium_runtime_diagnostics() -> dict[str, str]:
+    """Validate the Selenium pieces required by the packaged Windows app.
+
+    This does not launch a browser, access the network, authenticate a WhatsApp
+    account, or send a message.  It is safe for build and regression checks.
+    """
+    import selenium
+    from selenium.webdriver.common.selenium_manager import SeleniumManager
+
+    chrome_driver, _chrome_service, _chrome_options = _selenium_browser_components("chrome")
+    edge_driver, _edge_service, _edge_options = _selenium_browser_components("edge")
+    manager_path = Path(SeleniumManager._get_binary())
+    if not manager_path.is_file():
+        raise WhatsAppWebSessionError(
+            f"Selenium Manager nao foi incluido no aplicativo: {manager_path}"
+        )
+    return {
+        "selenium_version": str(getattr(selenium, "__version__", "")),
+        "chrome_driver_module": str(chrome_driver.__module__),
+        "edge_driver_module": str(edge_driver.__module__),
+        "selenium_manager_path": str(manager_path),
+    }
+
+
 def normalize_delivery_mode(value: object) -> str:
     mode = str(value or DELIVERY_MODE_OFFICIAL_API).strip() or DELIVERY_MODE_OFFICIAL_API
     if mode not in VALID_DELIVERY_MODES:
@@ -518,27 +563,25 @@ class WhatsAppWebExperimentalProvider:
 
     def _start_browser_driver(self, browser_name: str) -> Any:
         try:
-            from selenium import webdriver
-            if browser_name == "chrome":
-                from selenium.webdriver.chrome.service import Service as BrowserService
-            elif browser_name == "edge":
-                from selenium.webdriver.edge.service import Service as BrowserService
-            else:
-                raise WhatsAppWebSessionError(f"Navegador nao suportado: {browser_name}.")
+            BrowserDriver, BrowserService, BrowserOptions = _selenium_browser_components(browser_name)
         except ImportError as exc:
-            self._set_status(WEB_STATUS_ERROR, "Instale a biblioteca opcional selenium para usar o WhatsApp Web.")
+            self._set_status(
+                WEB_STATUS_ERROR,
+                "Os componentes do WhatsApp Web estao incompletos. Atualize ou reinstale o aplicativo.",
+            )
             raise WhatsAppWebSessionError(
-                "Biblioteca selenium nao encontrada. Instale com: py -m pip install selenium"
+                "Biblioteca Selenium incompleta no aplicativo. Atualize ou reinstale o Mezzold Connect."
             ) from exc
 
         driver_path, browser_path = self._resolve_browser_paths(browser_name)
-        options = self._build_browser_options(browser_name, browser_path)
+        options = self._build_browser_options(
+            browser_name,
+            browser_path,
+            options_class=BrowserOptions,
+        )
         service = BrowserService(executable_path=driver_path)
         try:
-            if browser_name == "chrome":
-                driver = webdriver.Chrome(service=service, options=options)
-            else:
-                driver = webdriver.Edge(service=service, options=options)
+            driver = BrowserDriver(service=service, options=options)
         except Exception as exc:
             raise WhatsAppWebSessionError(
                 f"Nao consegui iniciar o {_browser_label(browser_name)}: {exc}"
@@ -576,20 +619,26 @@ class WhatsAppWebExperimentalProvider:
         _web_log(f"driver_paths browser={browser_name} driver_path={driver_path} browser_path={browser_path}")
         return driver_path, browser_path
 
-    def _build_browser_options(self, browser_name: str, browser_path: str) -> Any:
+    def _build_browser_options(
+        self,
+        browser_name: str,
+        browser_path: str,
+        *,
+        options_class: Any | None = None,
+    ) -> Any:
         self._profile_dir = WEB_PROFILE_DIR / browser_name
         self._profile_dir.mkdir(parents=True, exist_ok=True)
-        try:
-            if browser_name == "chrome":
-                from selenium.webdriver.chrome.options import Options as BrowserOptions
-            else:
-                from selenium.webdriver.edge.options import Options as BrowserOptions
-        except ImportError as exc:
-            raise WhatsAppWebSessionError(
-                "Biblioteca selenium incompleta para configurar o navegador local."
-            ) from exc
+        if options_class is None:
+            try:
+                _driver_class, _service_class, options_class = _selenium_browser_components(
+                    browser_name
+                )
+            except ImportError as exc:
+                raise WhatsAppWebSessionError(
+                    "Biblioteca selenium incompleta para configurar o navegador local."
+                ) from exc
 
-        options = BrowserOptions()
+        options = options_class()
         options.binary_location = browser_path
         for argument in (
             f"--user-data-dir={self._profile_dir}",

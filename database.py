@@ -12,7 +12,7 @@ from typing import Any, Iterable
 
 
 APP_TITLE = "Mezzold Connect"
-APP_VERSION = "2.1.0"
+APP_VERSION = "2.1.1"
 APP_DOWNLOAD_URL = "https://github.com/ViniciusNoetzold/MezzoldConnect/releases"
 DEFAULT_CONTACT_FOLDER = "Importados"
 LATEST_SCHEMA_VERSION = 4

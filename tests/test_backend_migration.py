@@ -61,7 +61,7 @@ class BackendMigrationTests(unittest.TestCase):
     def test_fresh_schema_is_versioned_and_backup_is_consistent(self) -> None:
         self._use_database("fresh")
         self.assertEqual(database.get_schema_version(), database.LATEST_SCHEMA_VERSION)
-        self.assertEqual(database.APP_VERSION, "2.1.0")
+        self.assertEqual(database.APP_VERSION, "2.1.1")
         self.assertEqual(database.check_database_integrity(), (True, "ok"))
         report = database.get_migration_report()
         self.assertTrue(database.migration_report_path().is_file())

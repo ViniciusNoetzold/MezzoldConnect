@@ -1,10 +1,10 @@
 {
   "channels": {
     "stable": {
-      "latest_version": "2.1.0",
-      "download_url": "https://github.com/ViniciusNoetzold/MezzoldConnect/releases/download/v2.1.0/Mezzold.Connect.Setup.v2.1.0.exe",
-      "release_notes": "Migração completa da V1, warmup nativo, nova sidebar, compatibilidade de dados e instalador Windows.",
-      "sha256": "A28573BC980721671EC4AEE06AB0B24F50993CA45FD08DCEC9C6730834A281E2"
+      "latest_version": "2.1.1",
+      "download_url": "https://github.com/ViniciusNoetzold/MezzoldConnect/releases/download/v2.1.1/Mezzold.Connect.Setup.v2.1.1.exe",
+      "release_notes": "Senha master padrão, sidebar sem piscar e WhatsApp Web funcional no executável Windows.",
+      "sha256": "9C9CA8B78F516680D69D837D98756B1BAFD76533EE79DCB4B7617844BE6EA6BE"
     }
   }
 }

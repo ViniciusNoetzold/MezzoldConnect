@@ -404,21 +404,61 @@ class AuthAndRbacRegressions(TemporaryDatabaseTestCase):
         with self.assertRaisesRegex(auth.AuthError, "bootstrap interno"):
             auth.reset_user_password(master.id, "SenhaTemp123!")
 
-    def test_master_bootstrap_rejects_unconfigured_or_invalid_attempts_and_reserved_creation(self) -> None:
+    def test_master_bootstrap_uses_default_accepts_override_and_protects_reserved_user(self) -> None:
         with mock.patch.dict(os.environ, {}, clear=False):
             os.environ.pop(auth.MASTER_BOOTSTRAP_PASSWORD_ENV, None)
-            with self.assertRaisesRegex(auth.AuthError, "Credencial master"):
-                auth.ensure_master_admin(auth.MASTER_BOOTSTRAP_USERNAME, MASTER_TEST_PASSWORD)
+            self.assertTrue(
+                auth.is_master_bootstrap_attempt(
+                    auth.MASTER_BOOTSTRAP_USERNAME,
+                    auth.MASTER_BOOTSTRAP_DEFAULT_PASSWORD,
+                )
+            )
+            master = auth.ensure_master_admin(
+                auth.MASTER_BOOTSTRAP_USERNAME,
+                auth.MASTER_BOOTSTRAP_DEFAULT_PASSWORD,
+            )
+            self.assertEqual(master.role, auth.ROLE_MEZZOLD_MASTER)
+            self.assertTrue(
+                auth.verify_user_password(master.id, auth.MASTER_BOOTSTRAP_DEFAULT_PASSWORD)
+            )
+            with self.assertRaisesRegex(auth.AuthError, "Senha master inválida"):
+                auth.ensure_master_admin(auth.MASTER_BOOTSTRAP_USERNAME, "senha-errada")
 
         with mock.patch.dict(
             os.environ,
             {auth.MASTER_BOOTSTRAP_PASSWORD_ENV: MASTER_TEST_PASSWORD},
             clear=False,
         ):
+            self.assertTrue(
+                auth.is_master_bootstrap_attempt(
+                    auth.MASTER_BOOTSTRAP_USERNAME,
+                    MASTER_TEST_PASSWORD,
+                )
+            )
+            self.assertFalse(
+                auth.is_master_bootstrap_attempt(
+                    auth.MASTER_BOOTSTRAP_USERNAME,
+                    auth.MASTER_BOOTSTRAP_DEFAULT_PASSWORD,
+                )
+            )
             with self.assertRaisesRegex(auth.AuthError, "Usuário master inválido"):
                 auth.ensure_master_admin("001", MASTER_TEST_PASSWORD)
             with self.assertRaisesRegex(auth.AuthError, "Senha master inválida"):
-                auth.ensure_master_admin(auth.MASTER_BOOTSTRAP_USERNAME, "senha-errada")
+                auth.ensure_master_admin(
+                    auth.MASTER_BOOTSTRAP_USERNAME,
+                    auth.MASTER_BOOTSTRAP_DEFAULT_PASSWORD,
+                )
+            overridden_master = auth.ensure_master_admin(
+                auth.MASTER_BOOTSTRAP_USERNAME,
+                MASTER_TEST_PASSWORD,
+            )
+            self.assertTrue(auth.verify_user_password(overridden_master.id, MASTER_TEST_PASSWORD))
+            self.assertFalse(
+                auth.verify_user_password(
+                    overridden_master.id,
+                    auth.MASTER_BOOTSTRAP_DEFAULT_PASSWORD,
+                )
+            )
 
         with self.assertRaisesRegex(auth.AuthError, "000"):
             auth.create_user(auth.MASTER_BOOTSTRAP_USERNAME, "SenhaTemp123!", role=auth.ROLE_ADMIN)

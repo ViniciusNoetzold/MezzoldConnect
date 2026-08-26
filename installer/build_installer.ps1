@@ -8,7 +8,7 @@ $ErrorActionPreference = "Stop"
 $projectRoot = Split-Path -Parent $PSScriptRoot
 $venvPython = Join-Path $projectRoot ".venv_build\Scripts\python.exe"
 $appExe = Join-Path $projectRoot "dist\MezzoldConnect.exe"
-$installerName = "Mezzold.Connect.Setup.v2.1.0"
+$installerName = "Mezzold.Connect.Setup.v2.1.1"
 
 Push-Location $projectRoot
 try {

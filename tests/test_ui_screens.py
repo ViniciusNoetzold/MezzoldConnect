@@ -198,6 +198,35 @@ class CriticalUiFlowTests(unittest.TestCase):
         screen._keyboard_event(SimpleNamespace(key="M", ctrl=True, alt=True, shift=True))
         self.assertTrue(screen.master_mode_active)
 
+    def test_master_default_credentials_only_login_after_hotkey(self) -> None:
+        page = FakePage()
+        user = auth.User(7, "000", auth.ROLE_MEZZOLD_MASTER, True, False)
+        with patch("screens.login.auth.user_count", return_value=1), patch(
+            "screens.login.auth.is_master_bootstrap_attempt", return_value=True
+        ), patch(
+            "screens.login.auth.ensure_master_admin", return_value=user
+        ) as ensure_master, patch("screens.login.auth.set_current_user") as setter:
+            screen = LoginScreen(page)
+            screen.username_input.value = auth.MASTER_BOOTSTRAP_USERNAME
+            screen.password_input.value = auth.MASTER_BOOTSTRAP_DEFAULT_PASSWORD
+            screen.login()
+
+            ensure_master.assert_not_called()
+            self.assertIn("Modo autorizado", screen.error_text.value)
+            self.assertFalse(page.routes)
+
+            screen._keyboard_event(SimpleNamespace(key="M", ctrl=True, alt=True, shift=True))
+            screen.username_input.value = auth.MASTER_BOOTSTRAP_USERNAME
+            screen.password_input.value = auth.MASTER_BOOTSTRAP_DEFAULT_PASSWORD
+            screen.login()
+
+        ensure_master.assert_called_once_with(
+            auth.MASTER_BOOTSTRAP_USERNAME,
+            auth.MASTER_BOOTSTRAP_DEFAULT_PASSWORD,
+        )
+        setter.assert_called_once_with(user)
+        self.assertEqual(page.routes[-1], "/dashboard")
+
     def test_scheduled_campaign_uses_only_eligible_contacts(self) -> None:
         page = FakePage()
         folders = [{"id": 1, "name": "Clientes", "total_contacts": 2}]

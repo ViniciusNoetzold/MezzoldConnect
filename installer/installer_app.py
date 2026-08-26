@@ -10,6 +10,7 @@ import os
 import shutil
 import subprocess
 import sys
+import time
 import tkinter as tk
 import winreg
 from pathlib import Path
@@ -17,7 +18,7 @@ from tkinter import messagebox, ttk
 
 
 APP_NAME = "Mezzold Connect"
-APP_VERSION = "2.1.0"
+APP_VERSION = "2.1.1"
 INSTALL_ROOT = Path("C:/MezzoldConnect")
 APP_DIR = INSTALL_ROOT / "app"
 DATA_DIR = INSTALL_ROOT / "data"
@@ -76,6 +77,26 @@ def replace_executable_safely(source: Path, target: Path) -> None:
         if rollback.exists() and not target.exists():
             os.replace(rollback, target)
         raise
+
+
+def stop_running_application() -> None:
+    """Close installed app processes before replacing the Windows executable."""
+    if os.name != "nt" or not TARGET_EXE.exists():
+        return
+    options: dict[str, object] = {
+        "capture_output": True,
+        "text": True,
+    }
+    options["creationflags"] = subprocess.CREATE_NO_WINDOW
+    result = subprocess.run(
+        ["taskkill.exe", "/IM", TARGET_EXE.name, "/T", "/F"],
+        **options,
+    )
+    if result.returncode not in {0, 1, 128}:
+        detail = (result.stderr or result.stdout or "erro desconhecido").strip()
+        raise RuntimeError(f"Não foi possível encerrar a versão em execução: {detail}")
+    # Windows can retain the image mapping briefly after taskkill returns.
+    time.sleep(0.4)
 
 
 def _app_environment() -> dict[str, str]:
@@ -207,6 +228,7 @@ def run_installation(enable_startup: bool, open_after: bool) -> Path:
     previous_install = TARGET_EXE.exists()
     rollback = TARGET_EXE.with_suffix(TARGET_EXE.suffix + ".bak")
     failed_binary = TARGET_EXE.with_suffix(TARGET_EXE.suffix + ".failed")
+    stop_running_application()
     replace_executable_safely(source, TARGET_EXE)
     try:
         # This performs the one-time v1 copy (when applicable), a pre-migration

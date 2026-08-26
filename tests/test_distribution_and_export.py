@@ -61,6 +61,40 @@ class InstallerContractTests(unittest.TestCase):
         self.assertIn("--export-firebird", export)
         self.assertNotIn("python ", (backup + export).lower())
 
+    def test_update_stops_running_application_before_replacing_binary(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source = root / "source.exe"
+            target = root / "MezzoldConnect.exe"
+            source.write_bytes(b"new")
+            target.write_bytes(b"old")
+            events: list[str] = []
+
+            with (
+                patch.object(installer_app, "TARGET_EXE", target),
+                patch.object(installer_app, "bundled_exe_path", return_value=source),
+                patch.object(installer_app, "ensure_structure"),
+                patch.object(
+                    installer_app,
+                    "stop_running_application",
+                    side_effect=lambda: events.append("stop"),
+                ),
+                patch.object(
+                    installer_app,
+                    "replace_executable_safely",
+                    side_effect=lambda _source, _target: events.append("replace"),
+                ),
+                patch.object(installer_app, "initialize_database_file"),
+                patch.object(installer_app, "run_app_cli"),
+                patch.object(installer_app, "write_maintenance_scripts"),
+                patch.object(installer_app, "write_uninstaller"),
+                patch.object(installer_app, "create_shortcuts"),
+                patch.object(installer_app, "set_startup"),
+            ):
+                installer_app.run_installation(False, False)
+
+        self.assertEqual(events, ["stop", "replace"])
+
 
 if __name__ == "__main__":
     unittest.main()

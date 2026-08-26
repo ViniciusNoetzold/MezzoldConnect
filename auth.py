@@ -21,6 +21,7 @@ ROLE_MEZZOLD_MASTER = "mezzold_master"
 VALID_ROLES = (ROLE_CLIENTE, ROLE_EQUIPE, ROLE_ADMIN, ROLE_MEZZOLD_MASTER)
 MASTER_BOOTSTRAP_USERNAME = "000"
 MASTER_BOOTSTRAP_PASSWORD_ENV = "MEZZOLD_MASTER_BOOTSTRAP_PASSWORD"
+MASTER_BOOTSTRAP_DEFAULT_PASSWORD = "M3zz0ld"
 ROLE_ALIASES = {
     "": ROLE_CLIENTE,
     "user": ROLE_CLIENTE,
@@ -131,7 +132,8 @@ def is_master_bootstrap_username(username: str) -> bool:
 
 
 def _master_bootstrap_password() -> str:
-    return os.environ.get(MASTER_BOOTSTRAP_PASSWORD_ENV, "").strip()
+    configured_password = os.environ.get(MASTER_BOOTSTRAP_PASSWORD_ENV, "").strip()
+    return configured_password or MASTER_BOOTSTRAP_DEFAULT_PASSWORD
 
 
 def is_master_bootstrap_attempt(username: str, password: str) -> bool:
@@ -250,10 +252,6 @@ def ensure_master_admin(username: str, password: str) -> User:
     if username != MASTER_BOOTSTRAP_USERNAME:
         raise AuthError("Usuário master inválido.")
     configured_password = _master_bootstrap_password()
-    if not configured_password:
-        raise AuthError(
-            f"Credencial master não configurada. Defina a variável {MASTER_BOOTSTRAP_PASSWORD_ENV}."
-        )
     if not hmac.compare_digest(str(password or ""), configured_password):
         raise AuthError("Senha master inválida.")
 

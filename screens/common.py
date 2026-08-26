@@ -42,6 +42,9 @@ ROLE_LABELS = {
 SIDEBAR_COLLAPSED_WIDTH = 76
 SIDEBAR_EXPANDED_WIDTH = 260
 SIDEBAR_ANIMATION_MS = 180
+_SIDEBAR_EXPANDED_ATTR = "_mezzold_sidebar_expanded"
+_SIDEBAR_ACTIVE_TOKEN_ATTR = "_mezzold_sidebar_active_token"
+_SIDEBAR_NAVIGATION_TOKEN = object()
 
 
 @dataclass(frozen=True)
@@ -92,9 +95,62 @@ def disabled_page_transitions() -> ft.PageTransitionsTheme:
     )
 
 
+def sidebar_is_expanded(page: ft.Page) -> bool:
+    """Return the sidebar state kept for the lifetime of a Flet page.
+
+    Every application screen owns a newly constructed layout.  Keeping this
+    small piece of UI state on the page lets the replacement sidebar start at
+    the same width and opacity as the one it replaces, instead of briefly
+    rendering collapsed while the pointer is still over it.
+    """
+
+    return bool(getattr(page, _SIDEBAR_EXPANDED_ATTR, False))
+
+
+def set_sidebar_expanded(page: ft.Page, expanded: bool) -> None:
+    """Persist the current sidebar state across route view reconstruction."""
+
+    try:
+        setattr(page, _SIDEBAR_EXPANDED_ATTR, bool(expanded))
+    except (AttributeError, TypeError):
+        # Lightweight/foreign Page implementations may disallow custom
+        # attributes.  The sidebar still works for the currently mounted view.
+        pass
+
+
+def _set_active_sidebar_token(page: ft.Page, token: object) -> bool:
+    """Mark which sidebar may handle hover events for this page."""
+
+    try:
+        setattr(page, _SIDEBAR_ACTIVE_TOKEN_ATTR, token)
+        return True
+    except (AttributeError, TypeError):
+        return False
+
+
+def _sidebar_token_is_active(page: ft.Page, token: object) -> bool:
+    try:
+        return getattr(page, _SIDEBAR_ACTIVE_TOKEN_ATTR) is token
+    except (AttributeError, TypeError):
+        # Keep hover functional for page-like objects that cannot store a token.
+        return True
+
+
 def navigate(page: ft.Page, route: str) -> None:
-    if route:
-        page.go(route)
+    target = str(route or "").strip()
+    if not target:
+        return
+    current = str(getattr(page, "route", "") or "").split("?", 1)[0]
+    if current == target.split("?", 1)[0]:
+        return
+    previous_token = getattr(page, _SIDEBAR_ACTIVE_TOKEN_ATTR, None)
+    token_was_set = _set_active_sidebar_token(page, _SIDEBAR_NAVIGATION_TOKEN)
+    try:
+        page.go(target)
+    except Exception:
+        if token_was_set:
+            _set_active_sidebar_token(page, previous_token)
+        raise
 
 
 def clear_session(page: ft.Page | None = None) -> None:
@@ -315,6 +371,10 @@ def build_sidebar(page: ft.Page, selected_route: str) -> ft.Container:
     role = normalized_role()
     company_name = database.get_setting("company_name", "Mezzold").strip() or "Mezzold"
     animation = ft.Animation(SIDEBAR_ANIMATION_MS, ft.AnimationCurve.EASE_IN_OUT)
+    initially_expanded = sidebar_is_expanded(page)
+    initial_label_opacity = 1 if initially_expanded else 0
+    sidebar_token = object()
+    _set_active_sidebar_token(page, sidebar_token)
     animated_labels: list[ft.Text] = []
 
     def animated_label(
@@ -331,7 +391,7 @@ def build_sidebar(page: ft.Page, selected_route: str) -> ft.Container:
             weight=weight,
             color=color,
             key=key,
-            opacity=0,
+            opacity=initial_label_opacity,
             animate_opacity=animation,
             no_wrap=True,
         )
@@ -367,7 +427,7 @@ def build_sidebar(page: ft.Page, selected_route: str) -> ft.Container:
     logout_label = animated_label("Sair", color=ft.Colors.ERROR, key="sidebar-logout-label")
 
     sidebar = ft.Container(
-        width=SIDEBAR_COLLAPSED_WIDTH,
+        width=SIDEBAR_EXPANDED_WIDTH if initially_expanded else SIDEBAR_COLLAPSED_WIDTH,
         bgcolor=ft.Colors.SURFACE_CONTAINER,
         padding=12,
         key="app-sidebar",
@@ -422,10 +482,22 @@ def build_sidebar(page: ft.Page, selected_route: str) -> ft.Container:
     )
 
     def toggle_sidebar(event: ft.HoverEvent) -> None:
+        # Flet can dispatch hover=False for the old control while replacing a
+        # route View.  Only the sidebar belonging to the current generation may
+        # change the persisted state; the replacement still handles a genuine
+        # pointer leave normally.
+        if not _sidebar_token_is_active(page, sidebar_token):
+            return
         expanded = str(getattr(event, "data", event)).strip().lower() == "true"
-        sidebar.width = SIDEBAR_EXPANDED_WIDTH if expanded else SIDEBAR_COLLAPSED_WIDTH
+        target_width = SIDEBAR_EXPANDED_WIDTH if expanded else SIDEBAR_COLLAPSED_WIDTH
+        target_opacity = 1 if expanded else 0
+        set_sidebar_expanded(page, expanded)
+        labels_already_set = all(label.opacity == target_opacity for label in animated_labels)
+        if sidebar.width == target_width and labels_already_set:
+            return
+        sidebar.width = target_width
         for label in animated_labels:
-            label.opacity = 1 if expanded else 0
+            label.opacity = target_opacity
         safe_update(page)
 
     sidebar.on_hover = toggle_sidebar

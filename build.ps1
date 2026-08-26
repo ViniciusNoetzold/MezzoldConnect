@@ -45,11 +45,16 @@ try {
         "--name", "MezzoldConnect",
         "--product-name", "Mezzold Connect",
         "--file-description", "Mezzold Connect - Gestao de campanhas WhatsApp",
-        "--product-version", "2.1.0",
-        "--file-version", "2.1.0.0",
+        "--product-version", "2.1.1",
+        "--file-version", "2.1.1.0",
         "--company-name", "Mezzold Studios",
         "--copyright", "Copyright (c) Mezzold Studios",
         "--hidden-import", "selenium", "selenium.webdriver", "selenium.webdriver.chrome", "selenium.webdriver.edge", "pystray", "PIL",
+        # Selenium 4.47 exposes WebDriver classes through lazy imports. Package
+        # every Selenium submodule so Chrome/Edge work in the frozen executable.
+        # Flet's argparse requires raw values beginning with "--" to be
+        # attached with "=" instead of passed as a separate argument.
+        "--pyinstaller-build-args=--collect-submodules=selenium",
         "--yes"
     )
     if ($DebugConsole) {
@@ -65,6 +70,41 @@ try {
     if (!(Test-Path -LiteralPath $appExe)) {
         throw "O build terminou sem criar dist\MezzoldConnect.exe."
     }
+
+    # Inspect the actual one-file archive. This catches both the Selenium 4.47
+    # lazy-import regression and a missing Selenium Manager before publishing.
+    $archiveViewer = Join-Path $projectRoot ".venv_build\Scripts\pyi-archive_viewer.exe"
+    if (!(Test-Path -LiteralPath $archiveViewer)) {
+        throw "Validador do pacote PyInstaller ausente: $archiveViewer"
+    }
+    $archiveListing = (& $archiveViewer -r -l $appExe 2>&1 | Out-String)
+    if ($LASTEXITCODE -ne 0) {
+        throw "Nao foi possivel validar o conteudo do executavel gerado."
+    }
+    # pyi-archive-viewer prints data paths with Python repr escaping (\\).
+    $archiveListing = $archiveListing.Replace("\\", "\")
+    $requiredSeleniumEntries = @(
+        "selenium.webdriver.chrome.webdriver",
+        "selenium.webdriver.edge.webdriver",
+        "selenium.webdriver.chromium.webdriver",
+        "selenium.webdriver.common.selenium_manager",
+        "selenium\webdriver\common\windows\selenium-manager.exe"
+    )
+    foreach ($entry in $requiredSeleniumEntries) {
+        if (!$archiveListing.Contains($entry)) {
+            throw "Build incompleto: componente Selenium ausente no executavel: $entry"
+        }
+    }
+    $runtimeCheck = Start-Process `
+        -FilePath $appExe `
+        -ArgumentList "--check-whatsapp-web-runtime" `
+        -PassThru `
+        -Wait `
+        -WindowStyle Hidden
+    if ($runtimeCheck.ExitCode -ne 0) {
+        throw "Build incompleto: o diagnostico Selenium falhou dentro do executavel (codigo $($runtimeCheck.ExitCode))."
+    }
+    Write-Host "WhatsApp Web validado no pacote e em runtime: Chrome, Edge e Selenium Manager presentes."
 
     $artifact = Get-Item -LiteralPath $appExe
     Write-Host "Build concluido: $($artifact.FullName) ($($artifact.Length) bytes)"

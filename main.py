@@ -234,6 +234,11 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
     parser.add_argument("--initialize-database", action="store_true", help="Inicializa/migra o banco e encerra.")
     parser.add_argument("--backup-database", nargs="?", const="", metavar="DESTINO", help="Cria backup SQLite consistente.")
     parser.add_argument("--export-firebird", nargs="?", const="", metavar="DESTINO", help="Exporta os dados em SQL ANSI/Firebird.")
+    parser.add_argument(
+        "--check-whatsapp-web-runtime",
+        action="store_true",
+        help="Valida os componentes Selenium empacotados e encerra.",
+    )
     return parser.parse_args(argv)
 
 
@@ -241,6 +246,11 @@ def cli(argv: list[str] | None = None) -> int:
     global _start_minimized
     args = _parse_args(list(sys.argv[1:] if argv is None else argv))
     try:
+        if args.check_whatsapp_web_runtime:
+            from whatsapp import selenium_runtime_diagnostics
+
+            selenium_runtime_diagnostics()
+            return 0
         database.initialize_database()
         if args.initialize_database:
             _cli_output(f"Banco inicializado: {database.DB_PATH}")

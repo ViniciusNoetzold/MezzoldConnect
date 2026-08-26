@@ -8,7 +8,7 @@ Legenda: `[ ]` pendente · `[x]` migrado e validado · `[~]` migrado, mas depend
 
 - [x] Login local com senha PBKDF2, usuário ativo/inativo e atualização do último acesso.
 - [x] Perfis Cliente/Operador, Equipe, Administrador do cliente e Mezzold Master.
-- [x] Bootstrap protegido do Mezzold Master pela variável `MEZZOLD_MASTER_BOOTSTRAP_PASSWORD`.
+- [x] Bootstrap do Mezzold Master no modo `Ctrl+Alt+Shift+M`, usuário `000`, senha padrão `M3zz0ld` e override opcional por `MEZZOLD_MASTER_BOOTSTRAP_PASSWORD`.
 - [x] Primeiro usuário, troca obrigatória de senha e alteração da própria senha.
 - [x] Administração de usuários: criar, listar, ativar, desativar, redefinir senha e alterar perfil.
 - [x] Proteções do usuário reservado Mezzold Master.
@@ -143,3 +143,18 @@ Legenda: `[ ]` pendente · `[x]` migrado e validado · `[~]` migrado, mas depend
 - Instalador: `dist\Mezzold.Connect.Setup.v2.1.0.exe` — SHA-256 `A28573BC980721671EC4AEE06AB0B24F50993CA45FD08DCEC9C6730834A281E2`.
 - Limitação externa dos itens `[~]`: envio Meta real e autenticação QR do WhatsApp Web não foram executados sem credenciais/número de produção. Os contratos, bloqueios de segurança, DPAPI, fallback Chrome/Edge, estados da sessão e dry-run foram cobertos por testes. Nenhum contato real recebeu mensagem.
 - Distribuição: os dois binários estão sem assinatura Authenticode; o Windows SmartScreen pode exibir aviso até que um certificado de assinatura de código seja configurado.
+
+## Correção v2.1.1 — 26/08/2026
+
+- [x] Acesso master padrão restrito ao atalho `Ctrl+Alt+Shift+M`, usuário `000` e senha `M3zz0ld`.
+- [x] Estado da sidebar preservado entre rotas, com eventos atrasados da View anterior ignorados e recolhimento normal ao sair com o mouse.
+- [x] Chrome/Edge WebDriver e Selenium Manager incluídos e inspecionados dentro do executável PyInstaller.
+- [x] Chrome real abriu `web.whatsapp.com` com perfil persistente e a tela chegou ao estado **Aguardando QR Code**, sem enviar mensagem.
+- [x] Instalador encerra instâncias em execução antes da substituição atômica e preserva `C:\MezzoldConnect\data`.
+- Testes automatizados: **73/73 aprovados** no build v2.1.1.
+- Interface: autenticação master e navegação Dashboard → Conexão WhatsApp validadas; sidebar permaneceu expandida durante a troca e recolheu apenas na saída real do mouse; **0 erros e 0 avisos de console**.
+- Build: `dist\MezzoldConnect.exe` — SHA-256 `7C61B9295E600CBBAB66D68DD7841BE0F0690F2BC52EC21033E4992D09243631`.
+- Instalador: `dist\Mezzold.Connect.Setup.v2.1.1.exe` — SHA-256 `9C9CA8B78F516680D69D837D98756B1BAFD76533EE79DCB4B7617844BE6EA6BE`.
+- O próprio `MezzoldConnect.exe --check-whatsapp-web-runtime` retornou código 0 após o empacotamento.
+- Instalação local atualizada de 2.1.0 para 2.1.1; o binário anterior foi preservado como `MezzoldConnect.exe.bak`, e todas as contagens do banco permaneceram idênticas após a atualização (`integrity_check=ok`, schema 4).
+- A leitura do QR Code continua sendo uma autenticação feita manualmente pelo titular do WhatsApp; nenhum contato real recebeu mensagem durante a validação.

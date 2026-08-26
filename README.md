@@ -20,7 +20,7 @@ $env:MEZZOLD_DB_PATH = "$env:MEZZOLD_DATA_DIR\mezzold_connect.sqlite3"
 .\.venv_build\Scripts\python.exe main.py
 ```
 
-Em uma instalação nova, o primeiro acesso é criado pelo modo administrativo autorizado da v1: configure `MEZZOLD_MASTER_BOOTSTRAP_PASSWORD`, pressione `Ctrl+Alt+Shift+M` no login e use o usuário reservado `000`. Usuários comuns são criados depois em Configurações por um administrador.
+Em uma instalação nova, pressione `Ctrl+Alt+Shift+M` no login e use o usuário reservado `000` com a senha padrão `M3zz0ld`. Esse acesso master continua bloqueado no login comum e só é aceito depois da ativação do modo administrativo pelo atalho. Para substituir a senha padrão em uma instalação gerenciada, defina `MEZZOLD_MASTER_BOOTSTRAP_PASSWORD` antes de iniciar o aplicativo. Usuários comuns são criados depois em Configurações por um administrador.
 
 ## Dados e migração da v1
 
@@ -82,7 +82,7 @@ A tela de Saúde do Número é restrita a equipe, administrador e Mezzold Master
 Artefatos esperados:
 
 - `dist\MezzoldConnect.exe`
-- `dist\Mezzold.Connect.Setup.v2.1.0.exe`
+- `dist\Mezzold.Connect.Setup.v2.1.1.exe`
 
 O instalador chama o mecanismo de migração do próprio aplicativo, preserva `C:\MezzoldConnect\data`, cria atalhos e grava utilitários de backup/exportação que não dependem de uma instalação global do Python.
 
@@ -90,7 +90,7 @@ O inventário funcional e o estado da migração ficam em `MIGRATION_CHECKLIST.m
 
 ## Publicação e atualizações
 
-A release usa a branch `v2-flet`, a tag `v2.1.0` e anexa os dois executáveis, `update-manifest.json` e `RELEASE_NOTES_v2.1.0.md`. Não reutilize nem mova a tag antiga `v2.0.0`.
+A release atual usa a branch `v2-flet`, a tag `v2.1.1` e anexa os dois executáveis, `update-manifest.json` e `RELEASE_NOTES_v2.1.1.md`. Não reutilize nem mova as tags antigas `v2.0.0` e `v2.1.0`.
 
 Para habilitar a checagem pelo canal estável, configure na tela Atualizações:
 

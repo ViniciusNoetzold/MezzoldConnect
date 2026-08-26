@@ -115,7 +115,7 @@ class SettingsScreenTests(unittest.TestCase):
         with patch("screens.settings.app_update.check_for_updates", return_value=result) as checker:
             screen.check_updates()
         checker.assert_called_once_with(
-            "2.1.0",
+            "2.1.1",
             "",
             download_url="https://github.com/ViniciusNoetzold/MezzoldConnect/releases",
             channel="stable",
