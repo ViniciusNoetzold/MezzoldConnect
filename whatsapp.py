@@ -77,10 +77,25 @@ WEB_STATUS_LABELS = {
 }
 
 WEB_PROFILE_DIR = DATA_DIR / "whatsapp_web_experimental_profile"
+WEB_LOG_PATH = DATA_DIR / "whatsapp_web.log"
 
 
 class WhatsAppWebSessionError(WhatsAppAPIError):
     pass
+
+
+def _web_log(message: str) -> None:
+    try:
+        DATA_DIR.mkdir(parents=True, exist_ok=True)
+        timestamp = datetime.now().isoformat(timespec="seconds")
+        with WEB_LOG_PATH.open("a", encoding="utf-8") as file:
+            file.write(f"[{timestamp}] {message}\n")
+    except OSError:
+        pass
+
+
+def _browser_label(browser_name: str) -> str:
+    return {"chrome": "Chrome", "edge": "Edge"}.get(browser_name.lower(), browser_name.capitalize())
 
 
 def normalize_delivery_mode(value: object) -> str:
@@ -250,6 +265,16 @@ class WhatsAppBusinessClient:
                 delivery_mode=delivery_mode,
             )
 
+        if (
+            media_path
+            and not media_path.startswith(("http://", "https://"))
+            and delivery_mode == DELIVERY_MODE_OFFICIAL_API
+        ):
+            raise WhatsAppAPIError(
+                "Para envio real com imagem via API Oficial, o arquivo precisa estar hospedado em um link publico (https://). "
+                "No modo simulacao, a imagem local e registrada normalmente."
+            )
+
         if delivery_mode == DELIVERY_MODE_MANUAL_ASSISTED:
             return SendResult(
                 status="pendente_manual",
@@ -387,6 +412,8 @@ class WhatsAppWebExperimentalProvider:
         self._driver: Any | None = None
         self._status = WEB_STATUS_NOT_CONNECTED
         self._message = "Sessao local ainda nao aberta."
+        self._browser_name = ""
+        self._profile_dir = WEB_PROFILE_DIR
 
     def status_snapshot(self, refresh: bool = True) -> dict[str, str]:
         if refresh:
@@ -395,20 +422,26 @@ class WhatsAppWebExperimentalProvider:
             "status": self._status,
             "label": web_connection_status_label(self._status),
             "message": self._message,
-            "profile_dir": str(WEB_PROFILE_DIR),
+            "profile_dir": str(self._profile_dir),
         }
 
     def open_session(self) -> dict[str, str]:
+        _web_log("open_session requested")
         driver = self._ensure_driver()
         try:
             driver.get("https://web.whatsapp.com/")
             self._wait_for_login_or_qr(driver)
             self.refresh_status()
+            _web_log(
+                f"open_session ready status={self._status} browser={self._browser_name or '-'} "
+                f"profile_dir={self._profile_dir}"
+            )
             return self.status_snapshot(refresh=False)
         except WhatsAppWebSessionError:
             raise
         except Exception as exc:
             self._set_status(WEB_STATUS_ERROR, f"Erro ao abrir WhatsApp Web: {exc}")
+            _web_log(f"open_session error={exc}")
             raise WhatsAppWebSessionError(self._message) from exc
 
     def refresh_status(self) -> None:
@@ -421,6 +454,7 @@ class WhatsAppWebExperimentalProvider:
         except Exception as exc:
             self._driver = None
             self._set_status(WEB_STATUS_DISCONNECTED, f"Navegador desconectado: {exc}")
+            _web_log(f"refresh_status disconnected error={exc}")
 
     def send_campaign_message(self, contact: dict[str, Any], campaign: dict[str, Any]) -> SendResult:
         phone = normalize_phone(str(contact["phone"]))
@@ -460,30 +494,114 @@ class WhatsAppWebExperimentalProvider:
     def _ensure_driver(self) -> Any:
         if self._driver is not None:
             return self._driver
+
+        WEB_PROFILE_DIR.mkdir(parents=True, exist_ok=True)
+        errors: list[str] = []
+        for browser_name in ("chrome", "edge"):
+            try:
+                self._driver = self._start_browser_driver(browser_name)
+                self._browser_name = browser_name
+                self._set_status(
+                    WEB_STATUS_WAITING_QR,
+                    f"{_browser_label(browser_name)} aberto. Leia o QR Code se ele aparecer.",
+                )
+                _web_log(f"driver_ready browser={browser_name} profile_dir={self._profile_dir}")
+                return self._driver
+            except WhatsAppWebSessionError as exc:
+                errors.append(f"{_browser_label(browser_name)}: {exc}")
+                _web_log(f"driver_failed browser={browser_name} error={exc}")
+
+        detail = " | ".join(errors) if errors else "Nenhum navegador compativel foi iniciado."
+        message = f"Nao consegui abrir o navegador local do WhatsApp Web. {detail}"
+        self._set_status(WEB_STATUS_ERROR, message)
+        raise WhatsAppWebSessionError(message)
+
+    def _start_browser_driver(self, browser_name: str) -> Any:
         try:
             from selenium import webdriver
-            from selenium.common.exceptions import WebDriverException
+            if browser_name == "chrome":
+                from selenium.webdriver.chrome.service import Service as BrowserService
+            elif browser_name == "edge":
+                from selenium.webdriver.edge.service import Service as BrowserService
+            else:
+                raise WhatsAppWebSessionError(f"Navegador nao suportado: {browser_name}.")
         except ImportError as exc:
             self._set_status(WEB_STATUS_ERROR, "Instale a biblioteca opcional selenium para usar o WhatsApp Web.")
             raise WhatsAppWebSessionError(
                 "Biblioteca selenium nao encontrada. Instale com: py -m pip install selenium"
             ) from exc
 
-        WEB_PROFILE_DIR.mkdir(parents=True, exist_ok=True)
-        chrome_options = webdriver.ChromeOptions()
-        chrome_options.add_argument(f"--user-data-dir={WEB_PROFILE_DIR}")
-        chrome_options.add_argument("--profile-directory=Default")
-        chrome_options.add_argument("--start-maximized")
+        driver_path, browser_path = self._resolve_browser_paths(browser_name)
+        options = self._build_browser_options(browser_name, browser_path)
+        service = BrowserService(executable_path=driver_path)
         try:
-            self._driver = webdriver.Chrome(options=chrome_options)
-        except WebDriverException:
-            edge_options = webdriver.EdgeOptions()
-            edge_options.add_argument(f"--user-data-dir={WEB_PROFILE_DIR}")
-            edge_options.add_argument("--profile-directory=Default")
-            edge_options.add_argument("--start-maximized")
-            self._driver = webdriver.Edge(options=edge_options)
-        self._set_status(WEB_STATUS_WAITING_QR, "Navegador aberto. Leia o QR Code se ele aparecer.")
-        return self._driver
+            if browser_name == "chrome":
+                driver = webdriver.Chrome(service=service, options=options)
+            else:
+                driver = webdriver.Edge(service=service, options=options)
+        except Exception as exc:
+            raise WhatsAppWebSessionError(
+                f"Nao consegui iniciar o {_browser_label(browser_name)}: {exc}"
+            ) from exc
+        try:
+            import app_log
+
+            app_log.chrome_opened()
+        except Exception:
+            pass
+        return driver
+
+    def _resolve_browser_paths(self, browser_name: str) -> tuple[str, str]:
+        try:
+            from selenium.webdriver.common.selenium_manager import SeleniumManager
+        except ImportError as exc:
+            raise WhatsAppWebSessionError("Biblioteca selenium incompleta para localizar o navegador.") from exc
+        try:
+            result = SeleniumManager().binary_paths(["--browser", browser_name])
+        except Exception as exc:
+            raise WhatsAppWebSessionError(
+                f"Nao consegui localizar {_browser_label(browser_name)} e WebDriver neste computador."
+            ) from exc
+
+        driver_path = str(result.get("driver_path") or "").strip()
+        browser_path = str(result.get("browser_path") or "").strip()
+        if not driver_path or not browser_path:
+            raise WhatsAppWebSessionError(
+                f"Nao encontrei {_browser_label(browser_name)} e WebDriver neste computador."
+            )
+        if not Path(driver_path).exists():
+            raise WhatsAppWebSessionError(f"Driver do {_browser_label(browser_name)} nao foi encontrado.")
+        if not Path(browser_path).exists():
+            raise WhatsAppWebSessionError(f"Navegador {_browser_label(browser_name)} nao foi encontrado.")
+        _web_log(f"driver_paths browser={browser_name} driver_path={driver_path} browser_path={browser_path}")
+        return driver_path, browser_path
+
+    def _build_browser_options(self, browser_name: str, browser_path: str) -> Any:
+        self._profile_dir = WEB_PROFILE_DIR / browser_name
+        self._profile_dir.mkdir(parents=True, exist_ok=True)
+        try:
+            if browser_name == "chrome":
+                from selenium.webdriver.chrome.options import Options as BrowserOptions
+            else:
+                from selenium.webdriver.edge.options import Options as BrowserOptions
+        except ImportError as exc:
+            raise WhatsAppWebSessionError(
+                "Biblioteca selenium incompleta para configurar o navegador local."
+            ) from exc
+
+        options = BrowserOptions()
+        options.binary_location = browser_path
+        for argument in (
+            f"--user-data-dir={self._profile_dir}",
+            "--profile-directory=Default",
+            "--start-maximized",
+            "--no-first-run",
+            "--disable-default-apps",
+            "--disable-notifications",
+            "--remote-allow-origins=*",
+        ):
+            options.add_argument(argument)
+        return options
 
     def _ensure_connected_driver(self) -> Any:
         driver = self._ensure_driver()
@@ -502,6 +620,14 @@ class WhatsAppWebExperimentalProvider:
             lambda current_driver: self._page_state(current_driver)[0]
             in {WEB_STATUS_WAITING_QR, WEB_STATUS_CONNECTED}
         )
+        state, _ = self._safe_page_state(driver)
+        if state == WEB_STATUS_WAITING_QR:
+            try:
+                import app_log
+
+                app_log.whatsapp_qr_needed()
+            except Exception:
+                pass
 
     def _wait_until_connected(self, driver: Any) -> None:
         try:
@@ -514,9 +640,21 @@ class WhatsAppWebExperimentalProvider:
             WebDriverWait(driver, 60).until(
                 lambda current_driver: self._page_state(current_driver)[0] == WEB_STATUS_CONNECTED
             )
+            try:
+                import app_log
+
+                app_log.whatsapp_connected()
+            except Exception:
+                pass
         except TimeoutException as exc:
             status, message = self._safe_page_state(driver)
             self._set_status(status, message)
+            try:
+                import app_log
+
+                app_log.whatsapp_disconnected()
+            except Exception:
+                pass
             raise WhatsAppWebSessionError(
                 "WhatsApp Web nao esta conectado. Abra Configuracoes, conecte pelo QR Code e tente novamente."
             ) from exc
@@ -532,13 +670,12 @@ class WhatsAppWebExperimentalProvider:
         selectors = [
             (By.CSS_SELECTOR, "button[aria-label='Send']"),
             (By.CSS_SELECTOR, "button[aria-label='Enviar']"),
-            (By.XPATH, "//span[@data-icon='send']/ancestor::button"),
+            (By.XPATH, "//span[@data-icon='send']/ancestor::*[@role='button' or self::button][1]"),
+            (By.XPATH, "//*[@data-icon='send']/ancestor::*[@role='button' or self::button][1]"),
+            (By.XPATH, "//*[@data-icon='wds-ic-send-filled']/ancestor::*[@role='button' or self::button][1]"),
         ]
 
         def find_button(current_driver: Any) -> Any:
-            status, _message = self._page_state(current_driver)
-            if status != WEB_STATUS_CONNECTED:
-                raise WhatsAppWebSessionError("WhatsApp Web saiu do estado conectado.")
             for by, selector in selectors:
                 for element in current_driver.find_elements(by, selector):
                     if element.is_displayed() and element.is_enabled():
@@ -549,8 +686,10 @@ class WhatsAppWebExperimentalProvider:
             return WebDriverWait(driver, 45).until(find_button)
         except TimeoutException as exc:
             status, _message = self._safe_page_state(driver)
-            if status != WEB_STATUS_CONNECTED:
+            if status == WEB_STATUS_WAITING_QR:
                 raise WhatsAppWebSessionError("WhatsApp Web desconectou antes do envio.") from exc
+            if status == WEB_STATUS_DISCONNECTED:
+                raise WhatsAppWebSessionError("WhatsApp Web saiu do estado conectado.") from exc
             raise WhatsAppAPIError(
                 "Nao encontrei o botao de enviar no WhatsApp Web. Confira o numero e a conversa aberta."
             ) from exc
@@ -559,6 +698,10 @@ class WhatsAppWebExperimentalProvider:
         from selenium.webdriver.common.by import By
 
         if driver.find_elements(By.CSS_SELECTOR, "#pane-side"):
+            return WEB_STATUS_CONNECTED, "WhatsApp Web conectado neste computador."
+        if driver.find_elements(By.CSS_SELECTOR, "footer"):
+            return WEB_STATUS_CONNECTED, "WhatsApp Web conectado neste computador."
+        if driver.find_elements(By.CSS_SELECTOR, "div[contenteditable='true']"):
             return WEB_STATUS_CONNECTED, "WhatsApp Web conectado neste computador."
         if driver.find_elements(By.CSS_SELECTOR, "canvas"):
             return WEB_STATUS_WAITING_QR, "Aguardando leitura do QR Code no WhatsApp Web."

@@ -10,7 +10,14 @@ from typing import Any, Callable
 from campaigns import log_message
 from contacts import is_valid_phone, normalize_phone
 from database import connect, get_setting, now_text, row_to_dict, rows_to_dicts
-from whatsapp import WhatsAppAPIError, WhatsAppBusinessClient, load_config
+from whatsapp import (
+    DELIVERY_MODE_MANUAL_ASSISTED,
+    DELIVERY_MODE_OFFICIAL_API,
+    DELIVERY_MODE_WHATSAPP_WEB_EXPERIMENTAL,
+    WhatsAppAPIError,
+    WhatsAppBusinessClient,
+    load_config,
+)
 
 
 class WarmupError(ValueError):
@@ -50,6 +57,25 @@ INITIAL_DAILY_TARGET = 20
 DEFAULT_MAX_DAILY_TARGET = 500
 RAMP_RATE = 0.20
 AUTO_PAUSE_SCORE = 40
+PROVIDER_ALIASES = {
+    "oficial": DELIVERY_MODE_OFFICIAL_API,
+    "official": DELIVERY_MODE_OFFICIAL_API,
+    "official_api": DELIVERY_MODE_OFFICIAL_API,
+    "api_oficial": DELIVERY_MODE_OFFICIAL_API,
+    "web": DELIVERY_MODE_WHATSAPP_WEB_EXPERIMENTAL,
+    "whatsapp_web": DELIVERY_MODE_WHATSAPP_WEB_EXPERIMENTAL,
+    "whatsapp_web_experimental": DELIVERY_MODE_WHATSAPP_WEB_EXPERIMENTAL,
+    "manual": DELIVERY_MODE_MANUAL_ASSISTED,
+    "manual_assisted": DELIVERY_MODE_MANUAL_ASSISTED,
+}
+
+
+def normalize_provider(value: object) -> str:
+    provider = str(value or "").strip().lower().replace(" ", "_")
+    normalized = PROVIDER_ALIASES.get(provider)
+    if normalized is None:
+        raise WarmupError("Tipo de envio invalido para o aquecimento.")
+    return normalized
 
 
 def add_number(
@@ -66,6 +92,7 @@ def add_number(
     rest_start: str = "00:00",
     rest_end: str = "07:00",
     notes: str = "",
+    ready_for_campaigns: bool = False,
 ) -> int:
     display_name = display_name.strip() or "Numero WhatsApp"
     phone = normalize_phone(phone)
@@ -76,6 +103,7 @@ def add_number(
     messaging_limit = max(int(messaging_limit), 1)
     daily_target = _clamp(int(daily_target), INITIAL_DAILY_TARGET, messaging_limit)
     max_daily_target = max(int(max_daily_target), daily_target)
+    provider = normalize_provider(provider)
     timestamp = now_text()
     with connect() as conn:
         cursor = conn.execute(
@@ -83,8 +111,8 @@ def add_number(
             INSERT INTO whatsapp_numbers
                 (display_name, phone, phone_number_id, provider, status, quality_rating,
                  messaging_limit, daily_target, max_daily_target, active, rest_start,
-                 rest_end, notes, created_at, updated_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                 rest_end, notes, ready_for_campaigns, created_at, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 display_name,
@@ -100,6 +128,7 @@ def add_number(
                 rest_start.strip(),
                 rest_end.strip(),
                 notes.strip(),
+                int(bool(ready_for_campaigns)),
                 timestamp,
                 timestamp,
             ),
@@ -137,6 +166,8 @@ def update_number(number_id: int, **fields: object) -> None:
             value = max(int(float(str(value).replace(",", "."))), 1)
         elif key in {"active", "ready_for_campaigns"}:
             value = int(bool(value))
+        elif key == "provider":
+            value = normalize_provider(value)
         elif key in {"rest_start", "rest_end"}:
             value = str(value).strip()
             _validate_time(value, "Horario de descanso")
@@ -220,6 +251,23 @@ def list_recent_events(limit: int = 200) -> list[dict[str, Any]]:
     return rows_to_dicts(rows)
 
 
+def list_recent_runs(limit: int = 100, number_id: int | None = None) -> list[dict[str, Any]]:
+    query = """
+        SELECT r.*, n.display_name AS number_name, n.phone AS number_phone
+        FROM number_rampup_runs r
+        JOIN whatsapp_numbers n ON n.id = r.whatsapp_number_id
+    """
+    params: list[object] = []
+    if number_id is not None:
+        query += " WHERE r.whatsapp_number_id = ?"
+        params.append(int(number_id))
+    query += " ORDER BY r.started_at DESC, r.id DESC LIMIT ?"
+    params.append(max(int(limit), 1))
+    with connect() as conn:
+        rows = conn.execute(query, tuple(params)).fetchall()
+    return rows_to_dicts(rows)
+
+
 def dashboard_stats() -> dict[str, int]:
     with connect() as conn:
         total = conn.execute("SELECT COUNT(*) AS total FROM whatsapp_numbers").fetchone()["total"]
@@ -235,7 +283,11 @@ def run_number_rampup(
     client: WhatsAppBusinessClient | None = None,
     progress_callback: ProgressCallback | None = None,
     stop_event: Event | None = None,
+    explicit_user_confirmation: bool = False,
 ) -> dict[str, int]:
+    group_name = group_name.strip()
+    if not group_name:
+        raise WarmupError("Escolha um grupo de clientes para testar.")
     number = get_number(number_id)
     if not number:
         raise WarmupError("Não encontrei esse número.")
@@ -258,6 +310,8 @@ def run_number_rampup(
         raise WarmupError("Não há clientes autorizados disponíveis para aquecer esse número.")
 
     config = load_config()
+    delivery_mode = normalize_provider(number.get("provider"))
+    config.delivery_mode = delivery_mode
     if str(number.get("phone_number_id") or "").strip():
         config.phone_number_id = str(number["phone_number_id"]).strip()
     client = client or WhatsAppBusinessClient(config)
@@ -299,6 +353,8 @@ def run_number_rampup(
                         "template_name": config.default_template,
                         "template_language": config.default_language,
                         "message_category": "utility",
+                        "delivery_mode": delivery_mode,
+                        "explicit_user_confirmation": explicit_user_confirmation,
                     },
                 )
                 status = "simulado" if result.dry_run else result.status
@@ -324,11 +380,15 @@ def run_number_rampup(
                 error_message=error,
                 provider_message_id=provider_id,
                 action_url=action_url,
+                delivery_mode=delivery_mode,
                 message_body=message,
             )
             if progress_callback:
                 progress_callback(index, len(contacts), f"{contact['name']}: {status}")
-            _sleep_between_messages(index, len(contacts))
+            if _sleep_between_messages(index, len(contacts), stop_event=stop_event):
+                totals.skipped += len(contacts) - index
+                _finish_run(run_id, "paused", totals)
+                return totals.as_dict()
     finally:
         refresh_number_health(number_id)
 
@@ -453,8 +513,20 @@ def _select_contacts(number_id: int, limit: int, group_name: str) -> list[dict[s
     """
     params: list[object] = [number_id]
     if group_name.strip():
-        query += " AND c.group_name = ?"
-        params.append(group_name.strip())
+        query += """
+            AND (
+                c.group_name = ?
+                OR EXISTS (
+                    SELECT 1
+                    FROM contact_folder_members cfm
+                    JOIN contact_folders cf ON cf.id = cfm.folder_id
+                    WHERE cfm.contact_id = c.id
+                      AND cf.name = ? COLLATE NOCASE
+                )
+            )
+        """
+        normalized_group = group_name.strip()
+        params.extend([normalized_group, normalized_group])
     query += " ORDER BY RANDOM() LIMIT ?"
     params.append(limit)
     with connect() as conn:
@@ -539,14 +611,18 @@ def _sent_today_count(number_id: int) -> int:
     return int(row["total"] or 0)
 
 
-def _sleep_between_messages(index: int, total: int) -> None:
+def _sleep_between_messages(index: int, total: int, stop_event: Event | None = None) -> bool:
     if index >= total:
-        return
+        return False
     minimum = _setting_int("rampup_min_interval_seconds", 45, 1)
     maximum = _setting_int("rampup_max_interval_seconds", 180, minimum)
     if maximum < minimum:
         maximum = minimum
-    time.sleep(random.uniform(minimum, maximum))
+    delay = random.uniform(minimum, maximum)
+    if stop_event is not None:
+        return stop_event.wait(delay)
+    time.sleep(delay)
+    return False
 
 
 def _inside_rest_window(rest_start: str, rest_end: str) -> bool:

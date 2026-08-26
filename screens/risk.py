@@ -2,6 +2,7 @@
 import flet as ft
 import compliance
 import auth
+from screens import common
 
 LEVEL_LABELS = {
     'safe': 'Baixo',
@@ -72,6 +73,7 @@ class RiskScreen(ft.View):
             padding=20,
             content=ft.Column(controls=menu_items)
         )
+        sidebar = common.build_sidebar(page, "/risk")
 
         # Risk table
         self.risk_table = ft.DataTable(
@@ -121,7 +123,7 @@ class RiskScreen(ft.View):
                     ft.Row([
                         ft.Text("Conferir Risco & Compliance", size=28, weight=ft.FontWeight.BOLD),
                         ft.Container(expand=True),
-                        ft.ElevatedButton("Atualizar", icon=ft.Icons.REFRESH, on_click=self.load_risks),
+                        ft.ElevatedButton("Atualizar", icon=ft.Icons.REFRESH, key="risk-refresh", on_click=self.load_risks),
                     ]),
                     ft.Text("Monitore a conformidade com as regras do WhatsApp e reduza o risco de bloqueios.", size=13, color=ft.Colors.ON_SURFACE_VARIANT),
                     ft.Divider(height=15),
@@ -155,7 +157,7 @@ class RiskScreen(ft.View):
         self.app_page.go(route)
 
     def logout(self, e):
-        self.app_page.go("/")
+        common.logout(self.app_page, e)
 
     def load_risks(self, e=None):
         self.risk_table.rows.clear()

@@ -1,99 +1,99 @@
-﻿# Mezzold Connect V2
+# Mezzold Connect v2
 
-## Visao Geral
-Mezzold Connect V2 e uma aplicacao desktop para gestao de campanhas de mensagens WhatsApp, contatos e automacoes. Reescrita com interface moderna usando **Flet (Flutter)**, substituindo o Tkinter legado.
+Aplicativo desktop Windows para contatos, campanhas WhatsApp, compliance e aquecimento nativo de números. A interface usa Flet; dados, worker, agenda e warmup continuam no processo Python/SQLite do próprio aplicativo.
 
-## Estrutura de Pastas
-```
-MezzoldConnect_V2/
-  main.py              # Ponto de entrada e roteamento
-  database.py          # SQLite + migracao de schema
-  auth.py              # Autenticacao e perfis de usuario
-  campaigns.py         # Logica de campanhas
-  contacts.py          # Gestao de contatos e pastas
-  whatsapp.py          # Integracao Meta Cloud API
-  compliance.py        # Analise de risco e compliance
-  warmup.py            # Aquecimento de numeros
-  background_worker.py # Worker de envio em background
-  startup.py           # Inicializacao com Windows
-  network.py           # Verificacao de conexao
-  app_update.py        # Verificacao de atualizacoes
-  screens/             # Telas da aplicacao (Flet Views)
-    login.py
-    dashboard.py
-    contacts.py
-    campaigns.py
-    import_contacts.py
-    schedule.py
-    risk.py
-    history.py
-    health.py
-    settings.py
-  installer/           # Instalador oficial Windows
-    installer_app.py   # GUI do instalador (tkinter)
-    export_firebird.py # Exportacao SQL/Firebird
+## Executar em desenvolvimento
+
+No PowerShell, dentro desta pasta:
+
+```powershell
+py -m venv .venv_build
+.\.venv_build\Scripts\python.exe -m pip install -r requirements-build.txt
+.\.venv_build\Scripts\python.exe main.py
 ```
 
-## Instalacao
-Execute o instalador `Mezzold.Connect.Setup.v2.0.0.exe` da pasta `dist/`.
+O atalho `Iniciar_V2.bat` usa o mesmo ambiente. Para isolar dados durante testes:
 
-O instalador cria a seguinte estrutura no seu disco:
-```
-C:\MezzoldConnect\
-  app\                         # Executavel principal
-    MezzoldConnect.exe
-  data\                        # Banco de dados e arquivos
-    mezzold_connect.sqlite3    # Banco SQLite principal
-    mezzold_connect_firebird.sql  # Schema compativel Firebird/DBeaver
-    media\                     # Midias de campanhas
-    imports\                   # Planilhas importadas
-    exports\                   # Exportacoes
-    backups\                   # Backups automaticos
-    logs\                      # Logs do sistema
-  scripts\                     # Utilitarios de manutencao
-    backup_banco.bat           # Fazer backup rapidamente
-    exportar_dados_firebird_sql.bat  # Exportar para SQL/Firebird
-    abrir_pasta_dados.bat      # Abrir pasta de dados
-    export_firebird.py         # Script Python de exportacao
-  uninstall.ps1               # Desinstalador
+```powershell
+$env:MEZZOLD_DATA_DIR = "$env:TEMP\mezzold-connect-teste"
+$env:MEZZOLD_DB_PATH = "$env:MEZZOLD_DATA_DIR\mezzold_connect.sqlite3"
+.\.venv_build\Scripts\python.exe main.py
 ```
 
-## Banco de Dados
-O banco e SQLite3, armazenado em `C:\MezzoldConnect\data\mezzold_connect.sqlite3`.
+Em uma instalação nova, o primeiro acesso é criado pelo modo administrativo autorizado da v1: configure `MEZZOLD_MASTER_BOOTSTRAP_PASSWORD`, pressione `Ctrl+Alt+Shift+M` no login e use o usuário reservado `000`. Usuários comuns são criados depois em Configurações por um administrador.
 
-### Visualizacao no Firebird / DBeaver / FlameRobin
-O instalador gera automaticamente um arquivo `mezzold_connect_firebird.sql` com o schema e dados exportados em SQL padrao ANSI, compativel com:
-- **DBeaver** (abrir como script SQL)
-- **FlameRobin**
-- **Firebird** (via isql)
-- Qualquer outro SGBD que aceite SQL padrao
+## Dados e migração da v1
 
-Para atualizar o export, execute `C:\MezzoldConnect\scripts\exportar_dados_firebird_sql.bat`.
+- Instalação v2: `C:\MezzoldConnect\data\mezzold_connect.sqlite3`.
+- Origem v1 reconhecida: `%LOCALAPPDATA%\Mezzold Connect\data\mezzold_connect.sqlite3`.
+- Se a v2 ainda não tiver banco, a primeira inicialização faz uma cópia consistente da v1 com a API de backup do SQLite; a origem nunca é alterada.
+- Antes de qualquer migração incremental, é criado um backup em `data\backups` e a integridade é verificada.
+- Um banco v2 já existente nunca é sobrescrito automaticamente pelo banco legado.
+- Token protegido com DPAPI continua utilizável pelo mesmo usuário do Windows.
 
-## Telas Disponiveis
-| Rota | Descricao |
+Comandos de manutenção do executável:
+
+```powershell
+.\MezzoldConnect.exe --initialize-database
+.\MezzoldConnect.exe --backup-database "C:\MezzoldConnect\data\backups"
+.\MezzoldConnect.exe --export-firebird "C:\MezzoldConnect\data\mezzold_connect_firebird.sql"
+.\MezzoldConnect.exe --background
+.\MezzoldConnect.exe --minimized
+```
+
+## Telas
+
+| Rota | Função |
 |---|---|
-| `/` | Login e Cadastro |
-| `/dashboard` | Visao geral e metricas |
-| `/contacts` | Gestao de contatos e pastas |
-| `/campaigns` | Criar e listar campanhas |
-| `/import_contacts` | Importar planilhas Excel/CSV/TXT |
-| `/schedule` | Central de envios e agendamentos |
-| `/risk` | Analise de risco e compliance |
-| `/history` | Historico completo de envios |
-| `/health` | Saude e aquecimento de numeros |
-| `/settings` | Configuracoes, API Meta, usuarios |
+| `/` | Login, bootstrap autorizado e troca obrigatória de senha |
+| `/dashboard` | Métricas e campanhas recentes |
+| `/contacts` | Contatos, pastas, opt-in, blacklist e exportação |
+| `/import_contacts` | Importação CSV, TXT e XLSX |
+| `/lead_search` | Coleta manual assistida e deduplicação de leads |
+| `/campaigns` | Criação imediata/agendada, templates, variantes e mídia |
+| `/schedule` | Gestão, edição, pausa, retomada, cancelamento e reenvio |
+| `/risk` | Score e recomendações de compliance |
+| `/history` | Logs, links manuais, telefones usados e exportação CSV |
+| `/health` | Warmup nativo e saúde dos números |
+| `/connection` | Internet e sessão local do WhatsApp Web |
+| `/updates` | Canal, manifesto e download de atualização |
+| `/help` | FAQ pesquisável |
+| `/settings` | Conta, aparência, provedores, segurança, licença e usuários |
 
-## Perfis de Usuario
-- **Admin**: Acesso total (todas as telas, gerenciamento de usuarios)
-- **Equipe**: Acesso a campanhas, contatos e saude do numero
-- **Cliente**: Acesso basico
+A tela de Saúde do Número é restrita a equipe, administrador e Mezzold Master. A gestão de usuários é restrita a administrador/master.
 
-## Tecnologias
-- Python 3.12+
-- Flet 0.86+
-- SQLite3
-- Meta Cloud API (WhatsApp Business)
+## Segurança dos envios
 
-## Releases
-Disponiveis em: https://github.com/ViniciusNoetzold/MezzoldConnect/releases
+- `dry-run` começa ligado; simulações ficam identificadas no histórico.
+- Contatos sem opt-in ou em blacklist são bloqueados antes do provedor.
+- API Meta, WhatsApp Web experimental e modo manual assistido são selecionáveis por campanha.
+- Envio real por WhatsApp Web exige confirmação explícita na interface.
+- Token Meta pode vir do ambiente ou do armazenamento DPAPI; não é salvo em texto puro.
+- O modo Web usa perfil local persistente e tenta Chrome, depois Edge.
+
+## Testes e build Windows
+
+```powershell
+.\.venv_build\Scripts\python.exe -m unittest discover -s tests -p "test_*.py" -v
+.\build.ps1
+.\build_release.ps1
+```
+
+Artefatos esperados:
+
+- `dist\MezzoldConnect.exe`
+- `dist\Mezzold.Connect.Setup.v2.1.0.exe`
+
+O instalador chama o mecanismo de migração do próprio aplicativo, preserva `C:\MezzoldConnect\data`, cria atalhos e grava utilitários de backup/exportação que não dependem de uma instalação global do Python.
+
+O inventário funcional e o estado da migração ficam em `MIGRATION_CHECKLIST.md`.
+
+## Publicação e atualizações
+
+A release usa a branch `v2-flet`, a tag `v2.1.0` e anexa os dois executáveis, `update-manifest.json` e `RELEASE_NOTES_v2.1.0.md`. Não reutilize nem mova a tag antiga `v2.0.0`.
+
+Para habilitar a checagem pelo canal estável, configure na tela Atualizações:
+
+`https://github.com/ViniciusNoetzold/MezzoldConnect/releases/latest/download/update-manifest.json`
+
+O manifesto aponta para o instalador versionado e inclui seu SHA-256. Os binários atuais não possuem assinatura Authenticode; até a configuração de um certificado de assinatura de código, o Windows SmartScreen pode exibir um aviso.

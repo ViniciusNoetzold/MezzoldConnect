@@ -7,6 +7,7 @@ import contacts
 
 ContactError = contacts.ContactError
 ImportSummary = contacts.ImportSummary
+LeadMergeSummary = contacts.LeadMergeSummary
 
 
 def normalize_phone(phone: str) -> str:
@@ -34,6 +35,10 @@ def search_contacts(term: str, group_name: str = "") -> list[dict[str, object]]:
 
 def list_contacts_by_folder(folder_name: str, search: str = "") -> list[dict[str, object]]:
     return contacts.list_contacts_by_folder(folder_name, search=search)
+
+
+def export_contacts_csv(path_text: str, group_name: str = "", search: str = "") -> int:
+    return contacts.export_contacts_csv(path_text, group_name=group_name, search=search)
 
 
 def list_used_contacts(folder_name: str = "", search: str = "", limit: int = 1000) -> list[dict[str, object]]:
@@ -195,8 +200,27 @@ def register_inbound_message(phone: str, opted_in: bool = True, source: str = "w
     contacts.register_inbound_message(phone, opted_in=opted_in, source=source)
 
 
-def import_contacts(path_text: str, folder_name: str = "") -> ImportSummary:
-    return contacts.import_contacts(path_text, folder_name=folder_name)
+def import_contacts(
+    path_text: str,
+    folder_name: str = "",
+    **overrides: object,
+) -> ImportSummary:
+    return contacts.import_contacts(path_text, folder_name=folder_name, **overrides)
+
+
+def extract_leads_from_text(text: str) -> list[dict[str, str]]:
+    return contacts.extract_leads_from_text(text)
+
+
+def merge_lead_results(
+    current: list[dict[str, object]],
+    incoming: list[dict[str, object]],
+) -> tuple[list[dict[str, str]], LeadMergeSummary]:
+    return contacts.merge_lead_results(current, incoming)
+
+
+def import_leads(leads: list[dict[str, object]], folder_name: str = "") -> ImportSummary:
+    return contacts.import_leads(leads, folder_name=folder_name)
 
 
 def list_used_phones(limit: int = 1000) -> list[dict[str, Any]]:

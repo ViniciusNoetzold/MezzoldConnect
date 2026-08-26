@@ -1,9 +1,13 @@
-# -*- coding: utf-8 -*-
-import webbrowser
+from __future__ import annotations
+
+import csv
+import io
+
 import flet as ft
 import campaigns
 import contacts
 import auth
+from screens import common
 
 STATUS_LABELS = {
     'enviado': 'Enviado',
@@ -31,6 +35,10 @@ class HistoryScreen(ft.View):
     def __init__(self, page: ft.Page):
         super().__init__(route="/history", padding=0)
         self.app_page = page
+        self.logs_data = []
+        self.file_picker = ft.FilePicker()
+        if hasattr(page, "services"):
+            page.services.append(self.file_picker)
 
         user = auth.get_current_user() or "Usuário"
         role = auth.get_current_role() or "Cliente"
@@ -70,6 +78,7 @@ class HistoryScreen(ft.View):
             padding=20,
             content=ft.Column(controls=menu_items)
         )
+        sidebar = common.build_sidebar(page, "/history")
 
         # Logs Table
         self.data_table = ft.DataTable(
@@ -109,7 +118,8 @@ class HistoryScreen(ft.View):
                             ft.Text("Histórico de Disparos", size=28, weight=ft.FontWeight.BOLD),
                             ft.Container(expand=True),
                             ft.ElevatedButton("Atualizar", icon=ft.Icons.REFRESH, on_click=self.load_history),
-                            ft.ElevatedButton("Telefones Já Usados", icon=ft.Icons.PHONE_IN_TALK, on_click=self.show_sent_numbers_dialog),
+                            ft.ElevatedButton("Exportar CSV", icon=ft.Icons.DOWNLOAD, key="history-export", on_click=self.export_history),
+                            ft.ElevatedButton("Telefones Já Usados", icon=ft.Icons.PHONE_IN_TALK, key="history-used-phones", on_click=self.show_sent_numbers_dialog),
                         ]
                     ),
                     ft.Divider(height=15),
@@ -140,11 +150,12 @@ class HistoryScreen(ft.View):
         self.app_page.go(route)
 
     def logout(self, e):
-        self.app_page.go("/")
+        common.logout(self.app_page, e)
 
     def load_history(self, e=None):
         try:
             logs = campaigns.list_logs()
+            self.logs_data = list(logs)
             if not logs:
                 self.logs_container.content = ft.Text("Nenhum envio registrado ainda.", size=16, color=ft.Colors.ON_SURFACE_VARIANT)
             else:
@@ -153,7 +164,7 @@ class HistoryScreen(ft.View):
                     action_btn = None
                     action_url = item.get("action_url")
                     if action_url:
-                        action_btn = ft.TextButton("Abrir WhatsApp", icon=ft.Icons.OPEN_IN_BROWSER, on_click=lambda e, u=action_url: webbrowser.open(u))
+                        action_btn = ft.TextButton("Abrir WhatsApp", icon=ft.Icons.OPEN_IN_BROWSER, on_click=lambda e, u=action_url: common.open_url(self.app_page, str(u)))
 
                     self.data_table.rows.append(
                         ft.DataRow(
@@ -176,13 +187,43 @@ class HistoryScreen(ft.View):
         if hasattr(self, 'app_page') and self.app_page:
             self.app_page.update()
 
+    async def export_history(self, _event=None):
+        if not self.logs_data:
+            self.load_history()
+        if not self.logs_data:
+            common.show_snack(self.app_page, "Não há histórico para exportar.")
+            return
+        try:
+            output = io.StringIO(newline="")
+            writer = csv.writer(output, delimiter=";")
+            writer.writerow(["Data/hora", "Campanha", "Contato", "Telefone", "Status", "Modo", "Erro", "Link manual"])
+            for item in self.logs_data:
+                writer.writerow([
+                    item.get("created_at") or "",
+                    item.get("campaign_name") or "",
+                    item.get("recipient_name") or "",
+                    item.get("phone") or "",
+                    friendly_status(item.get("status")),
+                    friendly_mode(item.get("delivery_mode")),
+                    item.get("error_message") or "",
+                    item.get("action_url") or "",
+                ])
+            await self.file_picker.save_file(
+                dialog_title="Exportar histórico de disparos",
+                file_name="historico-disparos.csv",
+                file_type=ft.FilePickerFileType.CUSTOM,
+                allowed_extensions=["csv"],
+                src_bytes=("\ufeff" + output.getvalue()).encode("utf-8"),
+            )
+            common.show_snack(self.app_page, f"{len(self.logs_data)} registro(s) exportado(s).")
+        except Exception as ex:
+            common.show_snack(self.app_page, f"Erro ao exportar histórico: {ex}", error=True)
+
     def show_sent_numbers_dialog(self, e):
         try:
             used_list = contacts.list_used_phones()
         except Exception as ex:
-            self.app_page.snack_bar = ft.SnackBar(ft.Text(f"Erro: {str(ex)}"), bgcolor=ft.Colors.ERROR)
-            self.app_page.snack_bar.open = True
-            self.app_page.update()
+            common.show_snack(self.app_page, f"Erro: {str(ex)}", error=True)
             return
 
         rows = []
@@ -216,11 +257,9 @@ class HistoryScreen(ft.View):
                 height=450,
                 content=ft.ListView(controls=[table], expand=True)
             ),
-            actions=[ft.TextButton("Fechar", on_click=lambda _: setattr(dlg, 'open', False) or self.app_page.update())]
+            actions=[ft.TextButton("Fechar", on_click=lambda event: common.close_dialog(self.app_page, event))]
         )
-        self.app_page.overlay.append(dlg)
-        dlg.open = True
-        self.app_page.update()
+        self.app_page.show_dialog(dlg)
 
     def did_mount(self):
         self.load_history()

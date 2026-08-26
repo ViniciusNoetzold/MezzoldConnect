@@ -1,7 +1,12 @@
-# -*- coding: utf-8 -*-
+from __future__ import annotations
+
+import tempfile
+from pathlib import Path
+
 import flet as ft
+
 import contacts
-import auth
+from screens import common
 
 class ContactsScreen(ft.View):
     def __init__(self, page: ft.Page):
@@ -10,45 +15,10 @@ class ContactsScreen(ft.View):
         self.selected_folder = None
         self.selected_contact_id = None
         self.all_contacts_data = []
-
-        user = auth.get_current_user() or "Usuário"
-        role = auth.get_current_role() or "Cliente"
-
-        # Sidebar
-        menu_items = [
-            ft.Row([ft.Icon(ft.Icons.CONNECT_WITHOUT_CONTACT, color=ft.Colors.BLUE_ACCENT), ft.Text("Mezzold", size=20, weight=ft.FontWeight.BOLD)]),
-            ft.Text(f"{user}\nPerfil: {role}", size=13, color=ft.Colors.PRIMARY),
-            ft.Divider(height=20),
-            self._menu_button("Início", ft.Icons.HOME, route="/dashboard"),
-            self._menu_button("Clientes", ft.Icons.PEOPLE, selected=True, route="/contacts"),
-            self._menu_button("Nova Campanha", ft.Icons.SEND, route="/campaigns"),
-            self._menu_button("Agenda de Envios", ft.Icons.SCHEDULE, route="/schedule"),
-            self._menu_button("Conferir Risco", ft.Icons.WARNING_AMBER, route="/risk"),
-            self._menu_button("Histórico", ft.Icons.HISTORY, route="/history"),
-        ]
-
-        if str(role).lower() in ("equipe", "admin"):
-            menu_items.append(self._menu_button("Saúde do Número", ft.Icons.HEALTH_AND_SAFETY, route="/health"))
-
-        menu_items.extend([
-            self._menu_button("Configurações", ft.Icons.SETTINGS, route="/settings"),
-            ft.Container(expand=True),
-            ft.ElevatedButton(
-                "Sair",
-                icon=ft.Icons.LOGOUT,
-                width=210,
-                color=ft.Colors.ERROR,
-                style=ft.ButtonStyle(shape=ft.RoundedRectangleBorder(radius=8)),
-                on_click=self.logout
-            )
-        ])
-
-        sidebar = ft.Container(
-            width=250,
-            bgcolor=ft.Colors.SURFACE_CONTAINER,
-            padding=20,
-            content=ft.Column(controls=menu_items)
-        )
+        self.file_picker = ft.FilePicker()
+        if hasattr(page, "services"):
+            page.services.append(self.file_picker)
+        sidebar = common.build_sidebar(page, "/contacts")
 
         # Left folder panel
         self.folders_list = ft.ListView(expand=True, spacing=6)
@@ -81,6 +51,7 @@ class ContactsScreen(ft.View):
             label="Buscar por nome, telefone ou email",
             prefix_icon=ft.Icons.SEARCH,
             expand=True,
+            key="contacts-search",
             on_submit=lambda _: self.refresh_contacts()
         )
 
@@ -178,7 +149,9 @@ class ContactsScreen(ft.View):
                     ft.Row([
                         ft.Column([self.folder_title, self.folder_stats_text], spacing=2),
                         ft.Container(expand=True),
+                        ft.OutlinedButton("Buscar Leads", icon=ft.Icons.TRAVEL_EXPLORE, key="contacts-leads", on_click=lambda _: self.app_page.go("/lead_search")),
                         ft.ElevatedButton("Importar Contatos", icon=ft.Icons.UPLOAD_FILE, on_click=lambda _: self.app_page.go("/import_contacts")),
+                        ft.ElevatedButton("Exportar CSV", icon=ft.Icons.DOWNLOAD, key="contacts-export", on_click=self.export_contacts),
                         ft.ElevatedButton("Novo Contato", icon=ft.Icons.PERSON_ADD, bgcolor=ft.Colors.BLUE_ACCENT, color=ft.Colors.WHITE, on_click=lambda _: self.open_contact_dialog()),
                     ]),
                     ft.Divider(height=15),
@@ -215,12 +188,31 @@ class ContactsScreen(ft.View):
         self.app_page.go(route)
 
     def logout(self, e):
-        self.app_page.go("/")
+        common.logout(self.app_page, e)
 
     def show_snack(self, msg, color=ft.Colors.GREEN):
-        self.app_page.snack_bar = ft.SnackBar(ft.Text(msg), bgcolor=color)
-        self.app_page.snack_bar.open = True
-        self.app_page.update()
+        common.show_snack(self.app_page, msg, error=color in (ft.Colors.RED, ft.Colors.ERROR))
+
+    async def export_contacts(self, _event=None):
+        if not self.selected_folder:
+            self.show_snack("Selecione uma pasta para exportar.", ft.Colors.RED)
+            return
+        folder_name = str(self.selected_folder.get("name") or "")
+        search_text = (self.search_input.value or "").strip()
+        try:
+            with tempfile.TemporaryDirectory(prefix="mezzold-export-") as temp_dir:
+                source = Path(temp_dir) / "contatos.csv"
+                total = contacts.export_contacts_csv(str(source), folder_name, search_text)
+                await self.file_picker.save_file(
+                    dialog_title="Exportar contatos",
+                    file_name=f"contatos-{folder_name}.csv",
+                    file_type=ft.FilePickerFileType.CUSTOM,
+                    allowed_extensions=["csv"],
+                    src_bytes=source.read_bytes(),
+                )
+            self.show_snack(f"{total} contato(s) exportado(s) em CSV.")
+        except Exception as ex:
+            self.show_snack(f"Erro ao exportar contatos: {ex}", ft.Colors.RED)
 
     def clear_search(self, e):
         self.search_input.value = ""
@@ -388,9 +380,9 @@ class ContactsScreen(ft.View):
                         notes=notes.value or '',
                         blacklisted=blacklist_switch.value
                     )
-                    self.show_snack("Contato atualizado!")
+                    success_message = "Contato atualizado!"
                 else:
-                    contacts.add_contact(
+                    new_contact_id = contacts.add_contact(
                         name=name_val,
                         phone=phone_val,
                         email=email_field.value or '',
@@ -402,16 +394,18 @@ class ContactsScreen(ft.View):
                         consent_notes=consent_notes.value or '',
                         notes=notes.value or ''
                     )
-                    self.show_snack("Contato cadastrado com sucesso!")
-                dlg.open = False
-                self.app_page.update()
+                    if blacklist_switch.value:
+                        contacts.set_blacklist(new_contact_id, True)
+                    success_message = "Contato cadastrado com sucesso!"
+                self.app_page.pop_dialog()
                 self.refresh_contacts()
                 self.load_folders()
+                self.show_snack(success_message)
             except Exception as ex:
                 self.show_snack(f"Erro ao salvar: {str(ex)}", ft.Colors.RED)
 
         actions = [
-            ft.TextButton("Cancelar", on_click=lambda _: setattr(dlg, 'open', False) or self.app_page.update()),
+            ft.TextButton("Cancelar", on_click=lambda event: common.close_dialog(self.app_page, event)),
             ft.ElevatedButton("Salvar", bgcolor=ft.Colors.BLUE_ACCENT, color=ft.Colors.WHITE, on_click=on_save),
         ]
 
@@ -419,8 +413,7 @@ class ContactsScreen(ft.View):
             def on_opt_out(e):
                 try:
                     contacts.mark_opt_out(contact_id, reason="Opt-out solicitado pelo cliente via interface.")
-                    dlg.open = False
-                    self.app_page.update()
+                    self.app_page.pop_dialog()
                     self.refresh_contacts()
                     self.show_snack("Contato marcado como Opt-out / Blacklist.")
                 except Exception as ex:
@@ -442,17 +435,14 @@ class ContactsScreen(ft.View):
             ),
             actions=actions
         )
-        self.app_page.overlay.append(dlg)
-        dlg.open = True
-        self.app_page.update()
+        self.app_page.show_dialog(dlg)
 
     def delete_single_contact(self, contact_id):
         dlg = None
         def confirm_del(e):
             try:
                 contacts.delete_contact(contact_id)
-                dlg.open = False
-                self.app_page.update()
+                self.app_page.pop_dialog()
                 self.refresh_contacts()
                 self.load_folders()
                 self.show_snack("Contato excluído.")
@@ -464,13 +454,11 @@ class ContactsScreen(ft.View):
             title=ft.Text("Excluir Contato"),
             content=ft.Text("Tem certeza que deseja excluir este contato?"),
             actions=[
-                ft.TextButton("Não", on_click=lambda _: setattr(dlg, 'open', False) or self.app_page.update()),
+                ft.TextButton("Não", on_click=lambda event: common.close_dialog(self.app_page, event)),
                 ft.ElevatedButton("Sim, Excluir", bgcolor=ft.Colors.ERROR, color=ft.Colors.WHITE, on_click=confirm_del),
             ]
         )
-        self.app_page.overlay.append(dlg)
-        dlg.open = True
-        self.app_page.update()
+        self.app_page.show_dialog(dlg)
 
     def create_folder_dialog(self):
         name_field = ft.TextField(label="Nome da Nova Pasta")
@@ -481,8 +469,7 @@ class ContactsScreen(ft.View):
                 return
             try:
                 contacts.create_folder(v)
-                dlg.open = False
-                self.app_page.update()
+                self.app_page.pop_dialog()
                 self.load_folders()
                 self.show_snack(f"Pasta '{v}' criada com sucesso!")
             except Exception as ex:
@@ -493,13 +480,11 @@ class ContactsScreen(ft.View):
             title=ft.Text("Nova Pasta de Contatos"),
             content=name_field,
             actions=[
-                ft.TextButton("Cancelar", on_click=lambda _: setattr(dlg, 'open', False) or self.app_page.update()),
+                ft.TextButton("Cancelar", on_click=lambda event: common.close_dialog(self.app_page, event)),
                 ft.ElevatedButton("Criar", bgcolor=ft.Colors.GREEN_700, color=ft.Colors.WHITE, on_click=on_create)
             ]
         )
-        self.app_page.overlay.append(dlg)
-        dlg.open = True
-        self.app_page.update()
+        self.app_page.show_dialog(dlg)
 
     def rename_folder_dialog(self):
         if not self.selected_folder:
@@ -514,9 +499,8 @@ class ContactsScreen(ft.View):
                 return
             try:
                 contacts.rename_folder(self.selected_folder['id'], v)
-                dlg.open = False
+                self.app_page.pop_dialog()
                 self.selected_folder['name'] = v
-                self.app_page.update()
                 self.load_folders()
                 self.on_folder_selected(self.selected_folder)
                 self.show_snack("Pasta renomeada!")
@@ -528,13 +512,11 @@ class ContactsScreen(ft.View):
             title=ft.Text("Renomear Pasta"),
             content=name_field,
             actions=[
-                ft.TextButton("Cancelar", on_click=lambda _: setattr(dlg, 'open', False) or self.app_page.update()),
+                ft.TextButton("Cancelar", on_click=lambda event: common.close_dialog(self.app_page, event)),
                 ft.ElevatedButton("Salvar", bgcolor=ft.Colors.BLUE_ACCENT, color=ft.Colors.WHITE, on_click=on_rename)
             ]
         )
-        self.app_page.overlay.append(dlg)
-        dlg.open = True
-        self.app_page.update()
+        self.app_page.show_dialog(dlg)
 
     def delete_folder_dialog(self):
         if not self.selected_folder:
@@ -545,9 +527,8 @@ class ContactsScreen(ft.View):
         def on_delete(e):
             try:
                 moved_count = contacts.delete_folder(self.selected_folder['id'])
-                dlg.open = False
+                self.app_page.pop_dialog()
                 self.selected_folder = None
-                self.app_page.update()
                 self.load_folders()
                 self.show_snack(f"Pasta excluída. {moved_count} contatos foram movidos para 'Importados'.")
             except Exception as ex:
@@ -558,13 +539,11 @@ class ContactsScreen(ft.View):
             title=ft.Text("Excluir Pasta"),
             content=ft.Text(f"Deseja excluir a pasta '{self.selected_folder['name']}'?\nOs contatos serão preservados e movidos para 'Importados'."),
             actions=[
-                ft.TextButton("Cancelar", on_click=lambda _: setattr(dlg, 'open', False) or self.app_page.update()),
+                ft.TextButton("Cancelar", on_click=lambda event: common.close_dialog(self.app_page, event)),
                 ft.ElevatedButton("Excluir", bgcolor=ft.Colors.ERROR, color=ft.Colors.WHITE, on_click=on_delete)
             ]
         )
-        self.app_page.overlay.append(dlg)
-        dlg.open = True
-        self.app_page.update()
+        self.app_page.show_dialog(dlg)
 
     def did_mount(self):
         self.load_folders()

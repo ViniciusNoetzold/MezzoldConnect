@@ -4,6 +4,7 @@ import csv
 import re
 import unicodedata
 import zipfile
+from collections.abc import Iterable
 from dataclasses import dataclass, field
 from pathlib import Path
 from xml.etree import ElementTree
@@ -12,7 +13,23 @@ from database import DEFAULT_CONTACT_FOLDER, connect, now_text, row_to_dict, row
 
 
 PHONE_RE = re.compile(r"\D+")
+LEAD_PHONE_RE = re.compile(r"(?:\+?55[\s().-]*)?(?:\(?\d{2}\)?[\s().-]*)?(?:9?\d{4})[\s().-]?\d{4}")
 XLSX_NS = {"x": "http://schemas.openxmlformats.org/spreadsheetml/2006/main"}
+LEAD_NAME_BLOCKLIST = {
+    "aberto",
+    "agora",
+    "fechado",
+    "telefone",
+    "whatsapp",
+    "site",
+    "rotas",
+    "compartilhar",
+    "salvar",
+    "avaliacoes",
+    "avaliacao",
+    "horarios",
+    "horario",
+}
 
 
 class ContactError(ValueError):
@@ -26,6 +43,14 @@ class ImportSummary:
     skipped: int = 0
     duplicates: int = 0
     errors: list[str] = field(default_factory=list)
+
+
+@dataclass
+class LeadMergeSummary:
+    total: int = 0
+    round_found: int = 0
+    added: int = 0
+    duplicates: int = 0
 
 
 def normalize_text(value: str) -> str:
@@ -56,7 +81,9 @@ def is_valid_phone(phone: str) -> bool:
 def parse_opt_in(value: object) -> int:
     if isinstance(value, bool):
         return 1 if value else 0
-    text = normalize_text(str(value or "sim"))
+    if isinstance(value, (int, float)):
+        return 0 if value == 0 else 1
+    text = normalize_text(str("sim" if value is None else value))
     if text in {"nao", "n", "no", "false", "0", "sem_permissao", "descadastrado"}:
         return 0
     return 1
@@ -365,6 +392,48 @@ def list_contacts(search: str = "", group_name: str = "") -> list[dict[str, obje
     return rows_to_dicts(rows)
 
 
+def export_contacts_csv(path_text: str, group_name: str = "", search: str = "") -> int:
+    path = Path(path_text)
+    if not path.parent.exists():
+        raise ContactError("A pasta escolhida para exportar nao existe.")
+
+    items = list_contacts(search=search, group_name=group_name)
+    with path.open("w", newline="", encoding="utf-8-sig") as handle:
+        writer = csv.DictWriter(
+            handle,
+            fieldnames=[
+                "nome",
+                "telefone",
+                "pasta/grupo",
+                "status",
+                "observacoes",
+                "criado_em",
+                "atualizado_em",
+            ],
+            delimiter=";",
+        )
+        writer.writeheader()
+        for item in items:
+            if item.get("blacklisted"):
+                status = "bloqueado"
+            elif not item.get("opt_in"):
+                status = "sem_opt_in"
+            else:
+                status = "ativo"
+            writer.writerow(
+                {
+                    "nome": item.get("name") or "",
+                    "telefone": item.get("phone") or "",
+                    "pasta/grupo": item.get("group_name") or "",
+                    "status": status,
+                    "observacoes": item.get("notes") or item.get("consent_notes") or "",
+                    "criado_em": item.get("created_at") or "",
+                    "atualizado_em": item.get("updated_at") or "",
+                }
+            )
+    return len(items)
+
+
 def get_contact(contact_id: int) -> dict[str, object] | None:
     with connect() as conn:
         row = conn.execute("SELECT * FROM contacts WHERE id = ?", (contact_id,)).fetchone()
@@ -455,6 +524,13 @@ def list_used_contacts(folder_name: str = "", search: str = "", limit: int = 100
     with connect() as conn:
         rows = conn.execute(query, tuple(params)).fetchall()
     return rows_to_dicts(rows)
+
+
+def list_used_phones(limit: int = 1000) -> list[dict[str, object]]:
+    """Compatibility facade used by the v2 history screen."""
+    from campaigns import list_sent_numbers
+
+    return list_sent_numbers(limit=limit)
 
 
 def list_groups() -> list[str]:
@@ -618,7 +694,15 @@ def _pick(row: dict[str, str], aliases: set[str]) -> str:
     return ""
 
 
-def import_contacts(path_text: str, folder_name: str = "") -> ImportSummary:
+def import_contacts(
+    path_text: str,
+    folder_name: str = "",
+    *,
+    default_opt_in: int | bool | None = None,
+    opt_in_source: str | None = None,
+    opt_in_category: str | None = None,
+    consent_notes: str | None = None,
+) -> ImportSummary:
     path = Path(path_text)
     if not path.exists():
         raise ContactError("Arquivo não encontrado. Escolha a planilha novamente.")
@@ -639,11 +723,17 @@ def import_contacts(path_text: str, folder_name: str = "") -> ImportSummary:
         phone = normalize_phone(_pick(row, {"numero", "número", "telefone", "phone", "celular", "whatsapp"}))
         email = _pick(row, {"email", "e_mail"})
         group_name = target_folder or _pick(row, {"grupo", "lista", "group", "group_name", "pasta", "folder"}) or DEFAULT_CONTACT_FOLDER
-        opt_in = parse_opt_in(_pick(row, {"opt_in", "permissao", "permissão", "autorizacao", "autorização"}))
-        opt_in_source = _pick(row, {"origem", "fonte", "source", "opt_in_source"}) or "importacao"
-        opt_in_category = _pick(row, {"categoria", "category", "opt_in_category"}) or "marketing"
+        row_opt_in = _pick(row, {"opt_in", "permissao", "permissão", "autorizacao", "autorização"})
+        parsed_opt_in = parse_opt_in(row_opt_in)
+        if default_opt_in is not None:
+            parsed_opt_in = parse_opt_in(default_opt_in)
+        row_opt_in_source = _pick(row, {"origem", "fonte", "source", "opt_in_source"}) or "importacao"
+        row_opt_in_category = _pick(row, {"categoria", "category", "opt_in_category"}) or "marketing"
         opt_in_at = _pick(row, {"data_opt_in", "opt_in_at", "consentimento_em", "autorizado_em"})
-        consent_notes = _pick(row, {"prova", "proof", "consent_notes", "observacao_consentimento"})
+        row_consent_notes = _pick(row, {"prova", "proof", "consent_notes", "observacao_consentimento"})
+        final_source = str(opt_in_source).strip() if opt_in_source is not None else row_opt_in_source
+        final_category = str(opt_in_category).strip() if opt_in_category is not None else row_opt_in_category
+        final_notes = str(consent_notes).strip() if consent_notes is not None else row_consent_notes
 
         if not phone or not is_valid_phone(phone):
             summary.skipped += 1
@@ -661,11 +751,11 @@ def import_contacts(path_text: str, folder_name: str = "") -> ImportSummary:
                 phone,
                 email,
                 group_name,
-                opt_in,
-                opt_in_source,
-                opt_in_category,
+                parsed_opt_in,
+                final_source or "importacao",
+                final_category or "marketing",
                 opt_in_at,
-                consent_notes,
+                final_notes,
             )
         except ContactError as exc:
             summary.skipped += 1
@@ -677,4 +767,129 @@ def import_contacts(path_text: str, folder_name: str = "") -> ImportSummary:
         else:
             summary.imported += 1
 
+    return summary
+
+
+def _is_probable_lead_name(value: str) -> bool:
+    text = " ".join(str(value or "").split()).strip(" -|")
+    if len(text) < 3:
+        return False
+    lowered = text.casefold()
+    if lowered.startswith(("http://", "https://", "www.")):
+        return False
+    if any(token in lowered for token in LEAD_NAME_BLOCKLIST):
+        return False
+    if LEAD_PHONE_RE.search(text):
+        return False
+    letters = sum(char.isalpha() for char in text)
+    digits = sum(char.isdigit() for char in text)
+    return letters >= 3 and digits <= max(2, letters)
+
+
+def _guess_lead_name(lines: list[str], index: int) -> str:
+    for offset in range(1, 6):
+        previous_index = index - offset
+        if previous_index < 0:
+            break
+        candidate = lines[previous_index].strip()
+        if _is_probable_lead_name(candidate):
+            return candidate
+    return ""
+
+
+def extract_leads_from_text(text: str) -> list[dict[str, str]]:
+    lines = [line.strip() for line in str(text or "").splitlines() if line.strip()]
+    found: list[dict[str, str]] = []
+    seen: set[str] = set()
+    for index, line in enumerate(lines):
+        for raw_phone in LEAD_PHONE_RE.findall(line):
+            phone = normalize_phone(raw_phone)
+            if not is_valid_phone(phone) or phone in seen:
+                continue
+            seen.add(phone)
+            found.append(
+                {
+                    "name": _guess_lead_name(lines, index) or f"Lead {len(found) + 1}",
+                    "phone": phone,
+                    "source": line,
+                }
+            )
+    return found
+
+
+def merge_lead_results(
+    current: Iterable[dict[str, object]],
+    incoming: Iterable[dict[str, object]],
+) -> tuple[list[dict[str, str]], LeadMergeSummary]:
+    merged: list[dict[str, str]] = []
+    by_phone: dict[str, dict[str, str]] = {}
+    for lead in current:
+        phone = normalize_phone(str(lead.get("phone") or ""))
+        if not is_valid_phone(phone) or phone in by_phone:
+            continue
+        item = {
+            "name": str(lead.get("name") or "").strip(),
+            "phone": phone,
+            "source": str(lead.get("source") or "").strip(),
+        }
+        by_phone[phone] = item
+        merged.append(item)
+
+    summary = LeadMergeSummary(total=len(merged))
+    for index, lead in enumerate(incoming, start=1):
+        summary.round_found += 1
+        phone = normalize_phone(str(lead.get("phone") or ""))
+        if not is_valid_phone(phone):
+            continue
+        name = str(lead.get("name") or "").strip() or f"Lead {index}"
+        source = str(lead.get("source") or "").strip()
+        existing = by_phone.get(phone)
+        if existing:
+            summary.duplicates += 1
+            if name and existing.get("name", "").startswith("Lead "):
+                existing["name"] = name
+            if source and not existing.get("source"):
+                existing["source"] = source
+            continue
+        item = {"name": name, "phone": phone, "source": source}
+        by_phone[phone] = item
+        merged.append(item)
+        summary.added += 1
+    summary.total = len(merged)
+    return merged, summary
+
+
+def import_leads(leads: Iterable[dict[str, object]], folder_name: str = "") -> ImportSummary:
+    summary = ImportSummary()
+    target_folder = normalize_folder_name(folder_name) if folder_name.strip() else DEFAULT_CONTACT_FOLDER
+    seen: set[str] = set()
+    for index, lead in enumerate(leads, start=1):
+        name = str(lead.get("name") or "").strip() or f"Lead {index}"
+        phone = normalize_phone(str(lead.get("phone") or ""))
+        if not is_valid_phone(phone):
+            summary.skipped += 1
+            summary.errors.append(f"Lead {index}: numero invalido.")
+            continue
+        if phone in seen:
+            summary.duplicates += 1
+            continue
+        seen.add(phone)
+        try:
+            _, updated = upsert_contact(
+                name=name,
+                phone=phone,
+                group_name=target_folder,
+                opt_in=1,
+                opt_in_source="google_maps",
+                opt_in_category="marketing",
+                consent_notes="Importado da tela Buscar leads.",
+            )
+        except ContactError as exc:
+            summary.skipped += 1
+            summary.errors.append(f"Lead {index}: {exc}")
+            continue
+        if updated:
+            summary.updated += 1
+        else:
+            summary.imported += 1
     return summary

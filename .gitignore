@@ -16,6 +16,8 @@ env/
 build/
 dist/
 installer/build/
+output/
+.playwright-cli/
 *.egg-info/
 
 # Database & data (user data - not committed)
@@ -45,3 +47,7 @@ update_*.py
 rewrite_*.py
 clean_*.py
 check_*.py
+
+# Automated regression suite is part of the project.
+!tests/
+!tests/test_*.py
